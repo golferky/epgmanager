@@ -56,11 +56,6 @@ Module Program
                 Return
             End If
 
-            Console.Clear()
-            Console.WriteLine("================================================================================")
-            Console.WriteLine("EPG MANAGER v10.55 | STARTED: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))
-            Console.WriteLine("--------------------------------------------------------------------------------")
-
             ' ---------------------------------------------------
             ' 1️⃣ UPDATE STREAM IDS
             ' ---------------------------------------------------
