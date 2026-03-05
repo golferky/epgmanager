@@ -55,7 +55,6 @@ Module Program
                 Return
             End If
 
-            Dim config As New ConfigManager("config.json")
             ' ---------------------------------------------------
             ' 1️⃣ UPDATE STREAM IDS
             ' ---------------------------------------------------
