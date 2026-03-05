@@ -170,11 +170,6 @@ Module Program
 .Take(100)
 
             For Each s In planned
-                Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
-
-                Console.WriteLine(
-$"{s.Score,3} | {s.Candidate.StartTime:dddd MMM d HH:mm} | " &
-$"{s.Candidate.Channel,-18} | {ch.Item2,-4} | {s.Candidate.Title} {s.Reason}")
 
                 Dim owned = IsOwned(localHistoryDb, s.Candidate.Title)
 
