@@ -225,12 +225,9 @@ Module Program
             Console.ReadLine()
 
         Catch ex As Exception
-
-            Console.WriteLine("FATAL ERROR: " & ex.Message)
-            Console.ReadLine()
-
+            Console.WriteLine("FATAL ERROR:")
+            Console.WriteLine(ex.ToString())
         End Try
-
     End Sub
 
     ' --- DOWNLOAD LOGIC (USER ARCHIVE VERSION) ---
