@@ -564,8 +564,10 @@ WHERE rowid NOT IN (
 
             Dim sql =
 "
-CREATE INDEX IF NOT EXISTS idx_guide_start
-ON guide(start_utc);
+DROP INDEX IF EXISTS idx_guide_start;
+
+CREATE INDEX IF NOT EXISTS idx_guide_start_cover
+ON guide(start_utc, channel, normalized_title);
 
 CREATE INDEX IF NOT EXISTS idx_guide_channel_start
 ON guide(channel, start_utc);
@@ -576,7 +578,6 @@ ON guide(normalized_title, start_utc);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_guide_unique
 ON guide(channel, start_utc, normalized_title);
 "
-
             Using cmd As New SqliteCommand(sql, con)
                 cmd.ExecuteNonQuery()
             End Using
