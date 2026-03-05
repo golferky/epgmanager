@@ -683,10 +683,16 @@ ON guide(channel, start_utc, normalized_title);
             con.Open()
 
             For Each s In streams
+
+                If String.IsNullOrWhiteSpace(s.stream_id) _
+                OrElse String.IsNullOrWhiteSpace(s.epg_channel_id) Then
+                    Continue For
+                End If
+
                 Dim cmd As New SqliteCommand("
-            UPDATE channels
-            SET stream_id=@sid
-            WHERE lower(channel_id)=lower(@epg)
+        UPDATE channels
+        SET stream_id=@sid
+        WHERE lower(channel_id)=lower(@epg)
         ", con)
 
                 cmd.Parameters.AddWithValue("@sid", s.stream_id)
@@ -695,7 +701,7 @@ ON guide(channel, start_utc, normalized_title);
                 cmd.ExecuteNonQuery()
 
             Next
-        End Using
 
+        End Using
     End Sub
 End Module
