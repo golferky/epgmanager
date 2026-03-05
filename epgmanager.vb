@@ -551,8 +551,23 @@ CREATE TABLE guide (
         Using con As New SqliteConnection($"Data Source={dbPath}")
             con.Open()
 
+            ' Remove duplicates before creating unique index
+            Dim cleanupSql =
+"
+DELETE FROM guide
+WHERE rowid NOT IN (
+    SELECT MIN(rowid)
+    FROM guide
+    GROUP BY channel, start_utc, normalized_title
+);
+"
+
+            Using cleanup As New SqliteCommand(cleanupSql, con)
+                cleanup.ExecuteNonQuery()
+            End Using
+
             Dim sql =
-    "
+"
 CREATE INDEX IF NOT EXISTS idx_guide_start
 ON guide(start_utc);
 
