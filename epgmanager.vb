@@ -196,7 +196,11 @@ Module Program
 
                 If s.Score >= 70 Then
                     Console.ForegroundColor = ConsoleColor.Green
-                    Console.WriteLine("WOULD RECORD → " & s.Candidate.Title)
+                    Console.WriteLine(
+    $"WOULD RECORD → {s.Candidate.Title} | " &
+    $"{s.Candidate.StartTime:MMM d HH:mm} | " &
+    $"{s.Candidate.Channel} | " &
+    $"{streamId}")
                     Console.ResetColor()
                 End If
 
