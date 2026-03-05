@@ -127,18 +127,6 @@ Module Program
 
             End If
 
-
-            ' ---------------------------------------------------
-            ' TEST STOP (TEMPORARY)
-            ' ---------------------------------------------------
-
-            Console.WriteLine()
-            Console.WriteLine("Guide phase complete (TEST MODE).")
-            Console.WriteLine("Press Enter to exit.")
-            Console.ReadLine()
-            Return
-
-
             ' ---------------------------------------------------
             ' 3️⃣ SUGGESTIONS ENGINE
             ' ---------------------------------------------------
@@ -202,13 +190,9 @@ Module Program
                 End If
 
                 If s.Score >= 70 Then
-
-                    Recorder.RecordMovie(
-                    s.Candidate.Title,
-                    streamId,
-                    s.Candidate.StartTime,
-                    s.Candidate.EndTime)
-
+                    Console.ForegroundColor = ConsoleColor.Green
+                    Console.WriteLine("WOULD RECORD → " & s.Candidate.Title)
+                    Console.ResetColor()
                 End If
 
             Next
@@ -488,6 +472,7 @@ Module Program
             _HistPath = root.GetProperty("DB_HIST_PATH").GetString()
             _guideDir = root.GetProperty("GUIDE_DATA_DIR").GetString()
             _guidedb = root.GetProperty("GUIDE_MASTER_DB").GetString()
+            Console.WriteLine("Guide DB path: " & _guidedb)
             _nasWarehouseDir = root.GetProperty("WAREHOUSE").GetString()
             If root.TryGetProperty("EPG_BASE_URL", Nothing) Then _epgUrl = root.GetProperty("EPG_BASE_URL").GetString()
             If root.TryGetProperty("EPG_XMLTV", Nothing) Then _epgXMLTV = root.GetProperty("EPG_XMLTV").GetString()
