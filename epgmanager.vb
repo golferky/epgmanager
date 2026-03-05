@@ -203,7 +203,7 @@ ChannelLookup.GetMyChannel(localMoviesDb, s.Candidate.Channel)
     $"WOULD RECORD → {s.Candidate.Title} | " &
     $"{s.Candidate.StartTime:MMM d HH:mm} | " &
     $"{s.Candidate.Channel} | " &
-    $"{myChannell}")
+    $"{myChannel}")
                     Console.ResetColor()
                 End If
 
