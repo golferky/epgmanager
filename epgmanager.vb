@@ -184,6 +184,9 @@ Module Program
                 Dim streamId =
                 ChannelLookup.GetStreamId(localMoviesDb, s.Candidate.Channel)
 
+                Dim myChannel =
+ChannelLookup.GetMyChannel(localMoviesDb, s.Candidate.Channel)
+
                 If String.IsNullOrWhiteSpace(streamId) Then
                     Console.WriteLine("No stream mapping → " & s.Candidate.Channel)
                     Continue For
@@ -200,7 +203,7 @@ Module Program
     $"WOULD RECORD → {s.Candidate.Title} | " &
     $"{s.Candidate.StartTime:MMM d HH:mm} | " &
     $"{s.Candidate.Channel} | " &
-    $"{streamId}")
+    $"{myChannell}")
                     Console.ResetColor()
                 End If
 

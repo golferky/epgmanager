@@ -65,5 +65,23 @@ Public Module ChannelLookup
         End Using
 
     End Function
+    Public Function GetMyChannel(db As String, channel As String) As String
 
+        Using conn As New SQLiteConnection("Data Source=" & db)
+            conn.Open()
+
+            Dim cmd As New SQLiteCommand(
+                "SELECT my_channel FROM channels WHERE channel_id=@c", conn)
+
+            cmd.Parameters.AddWithValue("@c", channel)
+
+            Dim result = cmd.ExecuteScalar()
+
+            If result Is Nothing Then Return ""
+
+            Return result.ToString()
+
+        End Using
+
+    End Function
 End Module
