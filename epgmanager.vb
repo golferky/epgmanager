@@ -142,6 +142,8 @@ Module Program
                 localMoviesDb,
                 stats)
 
+            Console.WriteLine("Candidates found: " & candidates.Count)
+
             Dim scored = RecommendationEngine.ScoreAll(candidates)
 
             Console.WriteLine()
