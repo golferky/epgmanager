@@ -149,6 +149,8 @@ Module Program
             Console.WriteLine()
             Console.WriteLine("===== SUGGESTIONS =====")
             Console.WriteLine()
+            Console.WriteLine($"{"Score",5} {"Start",-18} {"Channel",-24} {"Title",-35} {"Nick",-10} {"MyCh",-5}")
+            Console.WriteLine(New String("-"c, 100))
 
             Dim myChannels = LoadMyChannels(localMoviesDb)
             Console.WriteLine("Movie channels loaded: " & myChannels.Count)
@@ -198,10 +200,15 @@ ChannelLookup.GetMyChannel(localMoviesDb, s.Candidate.Channel)
                 End If
 
                 If s.Score >= 70 Then
-                    Console.ForegroundColor = ConsoleColor.GreenConsole.WriteLine(
-$"WOULD RECORD → {s.Candidate.Title} | " &
-$"{s.Candidate.StartTime:MMM d HH:mm} | " &
-$"{s.Candidate.Channel} | {ch.Item1} | {ch.Item2}")
+                    Console.ForegroundColor = ConsoleColor.Green.WriteLine(
+Console.WriteLine(
+$"{s.Score,5} " &
+$"{s.Candidate.StartTime:MMM d HH:mm,-18} " &
+$"{s.Candidate.Channel,-24} " &
+$"{s.Candidate.Title,-35} " &
+$"{ch.Item1,-10} " &
+$"{ch.Item2,-5}"))
+
                     Console.ResetColor()
                 End If
 
