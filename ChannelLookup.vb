@@ -27,5 +27,43 @@ Public Module ChannelLookup
         End Using
 
     End Function
+    Public Function IsForeign(db As String, channel As String) As Boolean
+
+        Using conn As New SQLiteConnection("Data Source=" & db)
+            conn.Open()
+
+            Dim cmd As New SQLiteCommand(
+                "SELECT is_foreign FROM channels WHERE channel_id=@c", conn)
+
+            cmd.Parameters.AddWithValue("@c", channel)
+
+            Dim result = cmd.ExecuteScalar()
+
+            If result Is Nothing Then Return False
+
+            Return Convert.ToInt32(result) = 1
+
+        End Using
+
+    End Function
+    Public Function IsMovieChannel(db As String, channel As String) As Boolean
+
+        Using conn As New SQLiteConnection("Data Source=" & db)
+            conn.Open()
+
+            Dim cmd As New SQLiteCommand(
+                "SELECT is_movie_channel FROM channels WHERE channel_id=@c", conn)
+
+            cmd.Parameters.AddWithValue("@c", channel)
+
+            Dim result = cmd.ExecuteScalar()
+
+            If result Is Nothing Then Return False
+
+            Return Convert.ToInt32(result) = 1
+
+        End Using
+
+    End Function
 
 End Module

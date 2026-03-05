@@ -151,9 +151,12 @@ Module Program
             Console.WriteLine()
 
             Dim myChannels = LoadMyChannels(localMoviesDb)
+            Console.WriteLine("Movie channels loaded: " & myChannels.Count)
 
             Dim planned = scored _
 .Where(Function(x) myChannels.Contains(x.Candidate.Channel)) _
+.Where(Function(x) Not ChannelLookup.IsForeign(localMoviesDb, x.Candidate.Channel)) _
+.Where(Function(x) ChannelLookup.IsMovieChannel(localMoviesDb, x.Candidate.Channel)) _
 .Where(Function(x) x.Candidate.StartTime > DateTime.Now) _
 .GroupBy(Function(x) NormalizeTitle(x.Candidate.Title)) _
 .Select(Function(g) g _
@@ -613,24 +616,28 @@ ON guide(channel, start_utc, normalized_title);
         End Try
 
     End Function
-    Function LoadMyChannels(dbPath As String) As HashSet(Of String)
+    Private Function LoadMyChannels(db As String) As HashSet(Of String)
 
-        Dim setChannels As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim channels As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
-        Using con As New SqliteConnection($"Data Source={dbPath};Pooling=False;")
-            con.Open()
+        Using conn As New SQLiteConnection("Data Source=" & db)
+            conn.Open()
 
-            Dim cmd As New SqliteCommand(
-            "SELECT channel_id FROM channels WHERE my_channel IS NOT NULL", con)
+            Dim cmd As New SQLiteCommand(
+            "SELECT channel_id FROM channels WHERE is_movie_channel = 1 AND is_foreign = 0",
+            conn)
 
-            Using r = cmd.ExecuteReader()
-                While r.Read()
-                    setChannels.Add(r("channel_id").ToString())
+            Using rdr = cmd.ExecuteReader()
+
+                While rdr.Read()
+                    channels.Add(rdr.GetString(0))
                 End While
+
             End Using
+
         End Using
 
-        Return setChannels
+        Return channels
 
     End Function
     Function IsOwned(historyDb As String, title As String) As Boolean

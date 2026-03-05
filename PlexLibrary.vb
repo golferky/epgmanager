@@ -7,7 +7,6 @@ Public Module PlexLibrary
     Public Function MovieExists(title As String) As Boolean
 
         Dim clean = Normalize(title)
-        Console.WriteLine("DEBUG PLEX PATH=[" & _plexMoviesPath & "]")
 
         For Each file In Directory.GetFiles(_plexMoviesPath, "*.mp4")
 
