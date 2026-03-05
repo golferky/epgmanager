@@ -54,7 +54,7 @@ Module Program
                 Console.ReadLine()
                 Return
             End If
-
+            PlexLibrary.Init(config)
             ' ---------------------------------------------------
             ' 1️⃣ UPDATE STREAM IDS
             ' ---------------------------------------------------
