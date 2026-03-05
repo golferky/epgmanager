@@ -53,12 +53,17 @@ Public Module GuideQueryEngine
             ' ----------------------------------------
             ' QUERY GUIDE ONCE
             ' ----------------------------------------
+            Dim nowUtc = DateTime.UtcNow.ToString("yyyyMMddHHmmss")
+            Dim tomorrowUtc = DateTime.UtcNow.AddHours(24).ToString("yyyyMMddHHmmss")
+
             Dim cmd As New SQLiteCommand("
-                SELECT title, channel, start_utc, end_utc, normalized_title
-                FROM guide
-                WHERE start_utc BETWEEN datetime('now') 
-                                   AND datetime('now','+24 hours')
-                ORDER BY start_utc", guideCon)
+    SELECT title, channel, start_utc, end_utc, normalized_title
+    FROM guide
+    WHERE start_utc BETWEEN @now AND @tomorrow
+    ORDER BY start_utc", guideCon)
+
+            cmd.Parameters.AddWithValue("@now", nowUtc)
+            cmd.Parameters.AddWithValue("@tomorrow", tomorrowUtc)
 
             Using r = cmd.ExecuteReader()
 
