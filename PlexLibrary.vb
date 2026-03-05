@@ -3,18 +3,6 @@ Imports System.Text.RegularExpressions
 
 Public Module PlexLibrary
 
-    Private _plexPath As String
-
-    Public Sub Init(config As ConfigManager)
-
-        _plexPath = config.GetString("PLEX_MOVIES_PATH")
-
-        If String.IsNullOrWhiteSpace(_plexPath) Then
-            Throw New Exception("PLEX_MOVIES_PATH missing in config")
-        End If
-
-    End Sub
-
 
     Public Function MovieExists(title As String) As Boolean
 
