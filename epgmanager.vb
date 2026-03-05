@@ -152,7 +152,7 @@ Module Program
 
             Dim planned = scored _
             .Where(Function(x) myChannels.Contains(x.Candidate.Channel)) _
-            .Where(Function(x) x.Candidate.StartTime > DateTime.Now) _
+            '.Where(Function(x) x.Candidate.StartTime > DateTime.Now) _
             .GroupBy(Function(x) NormalizeTitle(x.Candidate.Title)) _
             .Select(Function(g) g _
                 .OrderByDescending(Function(m) TitleHelpers.GetChannelPriority(m.Candidate.Channel)) _
