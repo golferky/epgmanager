@@ -9,7 +9,7 @@ Public Module PlexLibrary
         Dim clean = Normalize(title)
         Console.WriteLine("DEBUG PLEX PATH=[" & _plexMoviesPath & "]")
 
-        For Each file In Directory.GetFiles(_plexPath, "*.mp4")
+        For Each file In Directory.GetFiles(_plexMoviesPath, "*.mp4")
 
             Dim name = Path.GetFileNameWithoutExtension(file)
 
