@@ -39,154 +39,13 @@ Module Program
     Private ReadOnly _localDir As String = "C:\Movies\"
     Private _localDb As String = ""
     Private _localHist As String = ""
-    Public Function BuildStreamUrl(streamId As String) As String
 
-        Return $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.m3u8"
-
-    End Function
-    Public Class XtreamStream
-        Public Property name As String
-        Public Property stream_id As Integer
-        Public Property category_id As String
-        Public Property epg_channel_id As String
-    End Class
-    Function ResolvePath(configPath As String) As String
-
-        If Environment.OSVersion.Platform = PlatformID.Win32NT Then
-
-            ' convert Mac volume path → Windows UNC
-            If configPath.StartsWith("/Volumes/") Then
-                Dim p = configPath.Replace("/Volumes/", "\\")
-                p = p.Replace("/", "\")
-                Return p
-            End If
-
-        End If
-
-        Return configPath
-
-    End Function
-    Private Function GuideDbIsEmpty(dbPath As String) As Boolean
-
-        Try
-            Using con As New SqliteConnection($"Data Source={dbPath}")
-                con.Open()
-
-                ' does table exist?
-                Dim tableCmd As New SqliteCommand(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='guide'", con)
-
-                If tableCmd.ExecuteScalar() Is Nothing Then
-                    Return True ' table missing = empty
-                End If
-
-                ' count rows
-                Dim countCmd As New SqliteCommand(
-                "SELECT COUNT(*) FROM guide", con)
-
-                Dim count = Convert.ToInt32(countCmd.ExecuteScalar())
-
-                Return count = 0
-            End Using
-
-        Catch
-            ' any error → treat as empty so we rebuild
-            Return True
-        End Try
-
-    End Function
-    Function LoadMyChannels(dbPath As String) As HashSet(Of String)
-
-        Dim setChannels As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-
-        Using con As New SqliteConnection($"Data Source={dbPath};Pooling=False;")
-            con.Open()
-
-            Dim cmd As New SqliteCommand(
-            "SELECT channel_id FROM channels WHERE my_channel IS NOT NULL", con)
-
-            Using r = cmd.ExecuteReader()
-                While r.Read()
-                    setChannels.Add(r("channel_id").ToString())
-                End While
-            End Using
-        End Using
-
-        Return setChannels
-
-    End Function
-    Function IsOwned(historyDb As String, title As String) As Boolean
-
-        Using con As New SqliteConnection($"Data Source={historyDb}")
-            con.Open()
-
-            Dim cmd As New SqliteCommand(
-            "SELECT 1 FROM recording_history WHERE title=@t AND owned=1 LIMIT 1", con)
-
-            cmd.Parameters.AddWithValue("@t", title)
-
-            Return cmd.ExecuteScalar() IsNot Nothing
-        End Using
-
-    End Function
-
-    Public Async Function GetXtreamJson(epgUrl As String,
-                                     user As String,
-                                     pass As String,
-                                     userAgent As String) As Task(Of String)
-
-        Dim apiUrl =
-        $"{_epgUrl}player_api.php?username={_epgUser}&password={_epgPass}&action=get_live_streams"
-        'http://primestreams.tv:826/player_api.php?username=jFYSJ6UprmRRO&password=Hq0Nl2sZqRGSR9yo&action=get_live_streams
-
-        Dim handler As New HttpClientHandler()
-        handler.AutomaticDecompression =
-        Net.DecompressionMethods.GZip Or Net.DecompressionMethods.Deflate
-
-        Using client As New HttpClient(handler)
-
-            client.DefaultRequestHeaders.Clear()
-            client.DefaultRequestHeaders.Add("User-Agent", userAgent)
-            client.DefaultRequestHeaders.Add("Accept", "*/*")
-
-            Dim response = Await client.GetAsync(apiUrl)
-            response.EnsureSuccessStatusCode()
-
-            Return Await response.Content.ReadAsStringAsync()
-
-        End Using
-
-    End Function
-    Public Sub UpdateStreamIds(epgUrl As String,
-                            user As String,
-                            pass As String,
-                            streams As List(Of XtreamStream),
-                            moviesDb As String)
-
-        Using con As New SqliteConnection($"Data Source={moviesDb};Pooling=False;")
-            con.Open()
-
-            For Each s In streams
-                Dim cmd As New SqliteCommand("
-            UPDATE channels
-            SET stream_id=@sid
-            WHERE lower(channel_id)=lower(@epg)
-        ", con)
-
-                cmd.Parameters.AddWithValue("@sid", s.stream_id)
-                cmd.Parameters.AddWithValue("@epg", s.epg_channel_id)
-
-                cmd.ExecuteNonQuery()
-
-            Next
-        End Using
-
-    End Sub
     Sub Main(args As String())
         Dim version = Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString()
 
         Console.Title = "EPG Manager v" & version
         Console.WriteLine("EPG MANAGER v" & version & " | STARTED: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))
+        Console.WriteLine("Testing Git sync")
 
         Dim sw As Stopwatch = Stopwatch.StartNew()
 
@@ -720,6 +579,130 @@ ON guide(channel, start_utc, normalized_title);
                 cmd.ExecuteNonQuery()
             End Using
 
+        End Using
+
+    End Sub
+
+    Public Class XtreamStream
+        Public Property name As String
+        Public Property stream_id As Integer
+        Public Property category_id As String
+        Public Property epg_channel_id As String
+    End Class
+
+    Private Function GuideDbIsEmpty(dbPath As String) As Boolean
+
+        Try
+            Using con As New SqliteConnection($"Data Source={dbPath}")
+                con.Open()
+
+                ' does table exist?
+                Dim tableCmd As New SqliteCommand(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='guide'", con)
+
+                If tableCmd.ExecuteScalar() Is Nothing Then
+                    Return True ' table missing = empty
+                End If
+
+                ' count rows
+                Dim countCmd As New SqliteCommand(
+                "SELECT COUNT(*) FROM guide", con)
+
+                Dim count = Convert.ToInt32(countCmd.ExecuteScalar())
+
+                Return count = 0
+            End Using
+
+        Catch
+            ' any error → treat as empty so we rebuild
+            Return True
+        End Try
+
+    End Function
+    Function LoadMyChannels(dbPath As String) As HashSet(Of String)
+
+        Dim setChannels As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        Using con As New SqliteConnection($"Data Source={dbPath};Pooling=False;")
+            con.Open()
+
+            Dim cmd As New SqliteCommand(
+            "SELECT channel_id FROM channels WHERE my_channel IS NOT NULL", con)
+
+            Using r = cmd.ExecuteReader()
+                While r.Read()
+                    setChannels.Add(r("channel_id").ToString())
+                End While
+            End Using
+        End Using
+
+        Return setChannels
+
+    End Function
+    Function IsOwned(historyDb As String, title As String) As Boolean
+
+        Using con As New SqliteConnection($"Data Source={historyDb}")
+            con.Open()
+
+            Dim cmd As New SqliteCommand(
+            "SELECT 1 FROM recording_history WHERE title=@t AND owned=1 LIMIT 1", con)
+
+            cmd.Parameters.AddWithValue("@t", title)
+
+            Return cmd.ExecuteScalar() IsNot Nothing
+        End Using
+
+    End Function
+
+    Public Async Function GetXtreamJson(epgUrl As String,
+                                     user As String,
+                                     pass As String,
+                                     userAgent As String) As Task(Of String)
+
+        Dim apiUrl =
+        $"{_epgUrl}player_api.php?username={_epgUser}&password={_epgPass}&action=get_live_streams"
+        'http://primestreams.tv:826/player_api.php?username=jFYSJ6UprmRRO&password=Hq0Nl2sZqRGSR9yo&action=get_live_streams
+
+        Dim handler As New HttpClientHandler()
+        handler.AutomaticDecompression =
+        Net.DecompressionMethods.GZip Or Net.DecompressionMethods.Deflate
+
+        Using client As New HttpClient(handler)
+
+            client.DefaultRequestHeaders.Clear()
+            client.DefaultRequestHeaders.Add("User-Agent", userAgent)
+            client.DefaultRequestHeaders.Add("Accept", "*/*")
+
+            Dim response = Await client.GetAsync(apiUrl)
+            response.EnsureSuccessStatusCode()
+
+            Return Await response.Content.ReadAsStringAsync()
+
+        End Using
+
+    End Function
+    Public Sub UpdateStreamIds(epgUrl As String,
+                            user As String,
+                            pass As String,
+                            streams As List(Of XtreamStream),
+                            moviesDb As String)
+
+        Using con As New SqliteConnection($"Data Source={moviesDb};Pooling=False;")
+            con.Open()
+
+            For Each s In streams
+                Dim cmd As New SqliteCommand("
+            UPDATE channels
+            SET stream_id=@sid
+            WHERE lower(channel_id)=lower(@epg)
+        ", con)
+
+                cmd.Parameters.AddWithValue("@sid", s.stream_id)
+                cmd.Parameters.AddWithValue("@epg", s.epg_channel_id)
+
+                cmd.ExecuteNonQuery()
+
+            Next
         End Using
 
     End Sub

@@ -5,3 +5,4 @@ obj/
 *.suo
 *.db
 *.log
+.DS_Store
