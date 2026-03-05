@@ -171,23 +171,10 @@ Module Program
 
             For Each s In planned
 
-                Dim owned = IsOwned(localHistoryDb, s.Candidate.Title)
-
-                If owned Then
-                    Console.ForegroundColor = ConsoleColor.DarkGray
-                Else
-                    Console.ForegroundColor = ConsoleColor.White
-                End If
-
-                Console.WriteLine(
-                $"{s.Score,3} | {s.Candidate.StartTime:dddd MMM d HH:mm} | " &
-                $"{s.Candidate.Channel,-10} | {s.Candidate.Title} {s.Reason}")
+                Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
 
                 Dim streamId =
-                ChannelLookup.GetStreamId(localMoviesDb, s.Candidate.Channel)
-
-                Dim myChannel =
-ChannelLookup.GetMyChannel(localMoviesDb, s.Candidate.Channel)
+    ChannelLookup.GetStreamId(localMoviesDb, s.Candidate.Channel)
 
                 If String.IsNullOrWhiteSpace(streamId) Then
                     Console.WriteLine("No stream mapping → " & s.Candidate.Channel)
@@ -200,8 +187,6 @@ ChannelLookup.GetMyChannel(localMoviesDb, s.Candidate.Channel)
                 End If
 
                 If s.Score >= 70 Then
-
-                    Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
 
                     Console.ForegroundColor = ConsoleColor.Green
 
