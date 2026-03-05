@@ -153,9 +153,8 @@ Module Program
             Dim myChannels = LoadMyChannels(localMoviesDb)
             Console.WriteLine("Movie channels loaded: " & myChannels.Count)
 
-            Dim ch = myChannels(s.Candidate.Channel)
             Dim planned = scored _
-.Where(Function(x) myChannels.ContainsKey(x.Candidate.Channel)) _
+.Where(Function(x) myChannels.Contains(x.Candidate.Channel)) _
 .Where(Function(x) Not ChannelLookup.IsForeign(localMoviesDb, x.Candidate.Channel)) _
 .Where(Function(x) ChannelLookup.IsMovieChannel(localMoviesDb, x.Candidate.Channel)) _
 .Where(Function(x) x.Candidate.StartTime > DateTime.Now) _
