@@ -45,7 +45,6 @@ Module Program
 
         Console.Title = "EPG Manager v" & version
         Console.WriteLine("EPG MANAGER v" & version & " | STARTED: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))
-        Console.WriteLine("Testing Git sync")
 
         Dim sw As Stopwatch = Stopwatch.StartNew()
 

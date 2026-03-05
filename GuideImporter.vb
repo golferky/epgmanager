@@ -43,8 +43,10 @@ VALUES (@t,@n,@c,@s,@e,@x)"
                     cmd.Parameters.AddWithValue("@e", "")
                     cmd.Parameters.AddWithValue("@x", "")
 
-                    Using reader = XmlReader.Create(xmlFile)
+                    Dim settings As New XmlReaderSettings()
+                    settings.DtdProcessing = DtdProcessing.Parse
 
+                    Using reader = XmlReader.Create(xmlFile, settings)
                         While reader.Read()
 
                             If reader.NodeType = XmlNodeType.Element AndAlso reader.Name = "programme" Then
