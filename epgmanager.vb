@@ -171,6 +171,8 @@ Module Program
 
             For Each s In planned
                 Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
+                Console.WriteLine(
+$"DEBUG → {s.Candidate.Channel} | nick={ch.Item1} | my={ch.Item2}")
                 Dim owned = IsOwned(localHistoryDb, s.Candidate.Title)
 
                 If owned Then
