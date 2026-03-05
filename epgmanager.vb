@@ -54,6 +54,7 @@ Module Program
                 Console.ReadLine()
                 Return
             End If
+            Dim config As New ConfigManager("config.json")
             PlexLibrary.Init(config)
             ' ---------------------------------------------------
             ' 1️⃣ UPDATE STREAM IDS
