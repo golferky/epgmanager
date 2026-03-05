@@ -168,7 +168,7 @@ Module Program
 .Take(100)
 
             For Each s In planned
-
+                Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
                 Dim owned = IsOwned(localHistoryDb, s.Candidate.Title)
 
                 If owned Then
@@ -198,11 +198,10 @@ ChannelLookup.GetMyChannel(localMoviesDb, s.Candidate.Channel)
                 End If
 
                 If s.Score >= 70 Then
-                    Console.ForegroundColor = ConsoleColor.Green
-                    Console.WriteLine(
+                    Console.ForegroundColor = ConsoleColor.GreenConsole.WriteLine(
 $"WOULD RECORD → {s.Candidate.Title} | " &
 $"{s.Candidate.StartTime:MMM d HH:mm} | " &
-$"{s.Candidate.Channel} | {ch.Nickname} | {ch.MyChannel}")
+$"{s.Candidate.Channel} | {ch.Item1} | {ch.Item2}")
                     Console.ResetColor()
                 End If
 
