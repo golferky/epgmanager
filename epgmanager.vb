@@ -205,14 +205,18 @@ ChannelLookup.GetMyChannel(localMoviesDb, s.Candidate.Channel)
                 End If
 
                 If s.Score >= 70 Then
+
+                    Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
+
                     Console.ForegroundColor = ConsoleColor.Green
 
                     Console.WriteLine(
-                    $"WOULD RECORD → {s.Candidate.Title} | " &
-                    $"{s.Candidate.StartTime:MMM d HH:mm} | " &
-                    $"{s.Candidate.Channel} | {ch.Item1} | {ch.Item2}")
+        $"WOULD RECORD → {s.Candidate.Title} | " &
+        $"{s.Candidate.StartTime:MMM d HH:mm} | " &
+        $"{s.Candidate.Channel} | {ch.Item2}")
 
                     Console.ResetColor()
+
                 End If
 
             Next
