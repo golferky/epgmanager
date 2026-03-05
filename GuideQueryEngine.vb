@@ -53,14 +53,37 @@ Public Module GuideQueryEngine
             ' ----------------------------------------
             ' QUERY GUIDE ONCE
             ' ----------------------------------------
+            ' ----------------------------------------
+            ' LOAD MY CHANNELS FOR SQL FILTER
+            ' ----------------------------------------
+            Dim channelList As New List(Of String)
+
+            Using cmdChannels As New SQLiteCommand(
+    "SELECT lower(channel_id) FROM channels WHERE my_channel IS NOT NULL",
+    movCon)
+
+                Using r = cmdChannels.ExecuteReader()
+                    While r.Read()
+                        channelList.Add("'" & r(0).ToString() & "'")
+                    End While
+                End Using
+            End Using
+
+            Dim channelFilter = String.Join(",", channelList)
+
+            ' ----------------------------------------
+            ' QUERY GUIDE ONCE
+            ' ----------------------------------------
             Dim nowUtc = DateTime.UtcNow.ToString("yyyyMMddHHmmss")
             Dim tomorrowUtc = DateTime.UtcNow.AddHours(24).ToString("yyyyMMddHHmmss")
 
-            Dim cmd As New SQLiteCommand("
-    SELECT title, channel, start_utc, end_utc, normalized_title
-    FROM guide
-    WHERE start_utc BETWEEN @now AND @tomorrow
-    ORDER BY start_utc", guideCon)
+            Dim cmd As New SQLiteCommand($"
+SELECT title, channel, start_utc, end_utc, normalized_title
+FROM guide
+WHERE lower(channel) IN ({channelFilter})
+  AND start_utc BETWEEN @now AND @tomorrow
+ORDER BY start_utc
+LIMIT 5000", guideCon)
 
             cmd.Parameters.AddWithValue("@now", nowUtc)
             cmd.Parameters.AddWithValue("@tomorrow", tomorrowUtc)
@@ -74,8 +97,16 @@ Public Module GuideQueryEngine
                     Dim title = r("title").ToString()
                     Dim channel = r("channel").ToString()
 
-                    Dim startUtc = DateTime.Parse(r("start_utc").ToString())
-                    Dim endUtc = DateTime.Parse(r("end_utc").ToString())
+                    Dim startUtc = DateTime.ParseExact(
+    r("start_utc").ToString(),
+    "yyyyMMddHHmmss",
+    Globalization.CultureInfo.InvariantCulture)
+
+                    Dim endUtc = DateTime.ParseExact(
+    r("end_utc").ToString(),
+    "yyyyMMddHHmmss",
+    Globalization.CultureInfo.InvariantCulture)
+
                     Dim norm = r("normalized_title").ToString()
 
                     ' -------- OWNED FILTER --------
