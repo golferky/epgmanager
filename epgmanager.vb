@@ -153,8 +153,9 @@ Module Program
             Dim myChannels = LoadMyChannels(localMoviesDb)
             Console.WriteLine("Movie channels loaded: " & myChannels.Count)
 
+            Dim ch = myChannels(s.Candidate.Channel)
             Dim planned = scored _
-.Where(Function(x) myChannels.Contains(x.Candidate.Channel)) _
+.Where(Function(x) myChannels.ContainsKey(x.Candidate.Channel)) _
 .Where(Function(x) Not ChannelLookup.IsForeign(localMoviesDb, x.Candidate.Channel)) _
 .Where(Function(x) ChannelLookup.IsMovieChannel(localMoviesDb, x.Candidate.Channel)) _
 .Where(Function(x) x.Candidate.StartTime > DateTime.Now) _
@@ -200,10 +201,9 @@ ChannelLookup.GetMyChannel(localMoviesDb, s.Candidate.Channel)
                 If s.Score >= 70 Then
                     Console.ForegroundColor = ConsoleColor.Green
                     Console.WriteLine(
-    $"WOULD RECORD → {s.Candidate.Title} | " &
-    $"{s.Candidate.StartTime:MMM d HH:mm} | " &
-    $"{s.Candidate.Channel} | " &
-    $"{myChannel}")
+$"WOULD RECORD → {s.Candidate.Title} | " &
+$"{s.Candidate.StartTime:MMM d HH:mm} | " &
+$"{s.Candidate.Channel} | {ch.Nickname} | {ch.MyChannel}")
                     Console.ResetColor()
                 End If
 
@@ -720,4 +720,8 @@ ON guide(channel, start_utc, normalized_title);
 
         End Using
     End Sub
+    Public Class ChannelInfo
+        Public Property Nickname As String
+        Public Property MyChannel As String
+    End Class
 End Module
