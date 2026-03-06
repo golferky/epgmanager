@@ -204,7 +204,7 @@ Module Program
 
                     Dim mins = Math.Floor(diff / 60)
                     Dim secs = diff Mod 60
-
+                    Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
                     Console.WriteLine($"{s.Candidate.StartTime:HH:mm}   {ch.Item1,-22} {s.Candidate.Title,-30} {mins,2}:{secs:00}")
 
                     If diff <= 30 AndAlso diff >= -30 AndAlso Not started.Contains(key) Then
