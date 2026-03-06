@@ -180,6 +180,12 @@ Module Program
 
                 Console.SetCursorPosition(0, dashboardTop)
 
+                For i = 0 To dashboardHeight - 1
+                    Console.SetCursorPosition(0, dashboardTop + i)
+                    Console.Write(New String(" "c, Console.WindowWidth))
+                Next
+
+                Console.SetCursorPosition(0, dashboardTop)
                 ' Clear dashboard area
                 For i = 1 To dashboardHeight
                     WriteLineClean("")
