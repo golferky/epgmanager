@@ -168,6 +168,8 @@ Module Program
     .First()) _
 .OrderBy(Function(x) x.Candidate.StartTime) _
 .Take(100)
+            Dim recordingLog As New List(Of String)
+
             While True
 
                 Console.Clear()
