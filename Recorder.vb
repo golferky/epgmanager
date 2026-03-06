@@ -115,6 +115,8 @@ $"""{tmp}"""
 
             _activeRecordings += 1
 
+            Console.WriteLine($"Recording duration → {duration} seconds")
+
             Dim p As New Process
 
             p.StartInfo.FileName = _ffmpegPath

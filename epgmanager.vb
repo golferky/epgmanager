@@ -215,21 +215,23 @@ Module Program
 
                     If diff <= 60 AndAlso diff >= -120 AndAlso Not started.Contains(key) Then
 
-                        started.Add(key)
+                        If started.Add(key) Then
 
-                        Dim streamId = ChannelLookup.GetStreamId(localMoviesDb, s.Candidate.Channel)
+                            Dim streamId = ChannelLookup.GetStreamId(localMoviesDb, s.Candidate.Channel)
 
-                        If String.IsNullOrWhiteSpace(streamId) Then Continue For
+                            If String.IsNullOrWhiteSpace(streamId) Then Continue For
 
-                        Recorder.RecordMovie(
-                s.Candidate.Title,
-                streamId,
-                s.Candidate.StartTime,
-                s.Candidate.EndTime)
+                            Recorder.RecordMovie(
+        s.Candidate.Title,
+        streamId,
+        s.Candidate.StartTime,
+        s.Candidate.EndTime)
 
-                        Dim msg = $"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
+                            Dim msg = $"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
 
-                        recordingLog.Add(msg)
+                            recordingLog.Add(msg)
+
+                        End If
 
                     End If
 
