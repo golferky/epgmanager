@@ -198,6 +198,8 @@ Module Program
 
                     Dim key = s.Candidate.Channel & "|" & s.Candidate.StartTime
 
+                    Dim diff = (s.Candidate.StartTime - DateTime.Now).TotalSeconds
+
                     If diff <= 30 AndAlso diff >= -30 AndAlso Not started.Contains(key) Then
 
                         started.Add(key)
