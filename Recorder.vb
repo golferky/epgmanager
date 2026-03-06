@@ -120,8 +120,7 @@ $"""{tmp}"""
 
             Dim p As New Process
 
-            p.StartInfo.FileName =
-                Path
+            p.StartInfo.FileName = _ffmpegPath
             p.StartInfo.Arguments = args
             p.StartInfo.UseShellExecute = False
             p.StartInfo.CreateNoWindow = True
