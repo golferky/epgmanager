@@ -173,6 +173,7 @@ Module Program
 
             Console.CursorVisible = False
 
+            Dim dashboardTop As Integer = Console.CursorTop
             Dim dashboardHeight As Integer = 30
 
             While True
