@@ -181,7 +181,16 @@ Module Program
                 Console.WriteLine("---------------------------------------------------------------")
                 Console.WriteLine("Start   Channel                 Title                          In")
                 Console.WriteLine("---------------------------------------------------------------")
+                Console.WriteLine()
+                Console.WriteLine("ACTIVE / STARTED RECORDINGS")
+                Console.WriteLine("---------------------------------------------------------------")
 
+                For Each r In recordingLog
+                    Console.ForegroundColor = ConsoleColor.Green
+                    Console.WriteLine(r)
+                Next
+
+                Console.ResetColor()
                 For Each s In planned.Take(10)
 
                     Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
@@ -196,8 +205,10 @@ $"{s.Candidate.StartTime:HH:mm}   {ch.Item1,-22} {s.Candidate.Title,-30} {mins,4
 
                     If diff <= 30 AndAlso diff >= -30 Then
                         Console.ForegroundColor = ConsoleColor.Green
-                        Console.WriteLine()
-                        Console.WriteLine($"▶ RECORDING NOW → {s.Candidate.Title}")
+                        Dim msg =
+$"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
+
+                        recordingLog.Add(msg)
                         Console.ResetColor()
                     End If
 
