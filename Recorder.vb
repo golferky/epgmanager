@@ -96,7 +96,7 @@ END_PADDING_SECONDS
 
             Dim streamUrl =
                 $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.m3u8"
-
+            Console.Writeline("Starting recording → " & streamUrl)
             Dim args =
 $"-nostdin -loglevel error " &
 $"-user_agent ""{_userAgent}"" " &
