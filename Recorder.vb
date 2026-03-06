@@ -107,9 +107,7 @@ $"-fflags +discardcorrupt " &
 $"-err_detect ignore_err " &
 $"-i ""{streamUrl}"" " &
 $"-t {duration} " &
-$"-map 0 " &
-$"-c copy " &
-$"-bsfs:a aac_adtstoasc " &
+$"-c:v copy -c:a copy " &
 $"-movflags +faststart " &
 $"""{tmp}"""
 
