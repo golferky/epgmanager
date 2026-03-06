@@ -53,9 +53,10 @@ Public Module Recorder
 
         Try
             Dim duration =
-    CInt((endTime - startTime).TotalSeconds) +
-    START_PADDING_SECONDS +
+    CInt((endTime - DateTime.Now).TotalSeconds) +
     END_PADDING_SECONDS
+
+            If duration < 300 Then duration = 300
 
             Dim normalized = NormalizeTitle(title)
             Dim year = ExtractYear(normalized)

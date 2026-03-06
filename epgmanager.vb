@@ -171,9 +171,11 @@ Module Program
             Dim recordingLog As New List(Of String)
             Dim started As New HashSet(Of String)
 
+            Console.CursorVisible = False
+
             While True
 
-                Console.Clear()
+                Console.SetCursorPosition(0, 0)
 
                 Console.WriteLine("EPG MANAGER DVR")
                 Console.WriteLine("---------------------------------------------------------------")
@@ -199,6 +201,11 @@ Module Program
                     Dim key = s.Candidate.Channel & "|" & s.Candidate.StartTime
 
                     Dim diff = (s.Candidate.StartTime - DateTime.Now).TotalSeconds
+
+                    Dim mins = Math.Floor(diff / 60)
+                    Dim secs = diff Mod 60
+
+                    Console.WriteLine($"{s.Candidate.StartTime:HH:mm}   {ch.Item1,-22} {s.Candidate.Title,-30} {mins,2}:{secs:00}")
 
                     If diff <= 30 AndAlso diff >= -30 AndAlso Not started.Contains(key) Then
 
