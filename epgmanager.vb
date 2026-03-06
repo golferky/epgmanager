@@ -230,7 +230,7 @@ Module Program
 
                             recordingLog.Add(msg)
 
-                            Log(ms)
+                            Log(msg)
                         End If
 
                     End If
