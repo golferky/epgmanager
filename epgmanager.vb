@@ -168,34 +168,45 @@ Module Program
     .First()) _
 .OrderBy(Function(x) x.Candidate.StartTime) _
 .Take(100)
+            While True
 
-            For Each s In planned
+                Console.Clear()
 
-                Dim owned = IsOwned(localHistoryDb, s.Candidate.Title)
+                Console.WriteLine("EPG MANAGER DVR")
+                Console.WriteLine("---------------------------------------------------------------")
+                Console.WriteLine($"Now: {DateTime.Now:dddd MMM d HH:mm:ss}")
+                Console.WriteLine()
 
-                If owned Then
-                    Console.ForegroundColor = ConsoleColor.DarkGray
-                Else
-                    Console.ForegroundColor = ConsoleColor.White
-                End If
+                Console.WriteLine("NEXT RECORDINGS")
+                Console.WriteLine("---------------------------------------------------------------")
+                Console.WriteLine("Start   Channel                 Title                          In")
+                Console.WriteLine("---------------------------------------------------------------")
 
-                Console.WriteLine(
-    $"{s.Score,3} | {s.Candidate.StartTime:dddd MMM d HH:mm} | " &
-    $"{s.Candidate.Channel,-10} | {s.Candidate.Title} {s.Reason}")
+                For Each s In planned.Take(10)
 
-                Dim diff =
-        (s.Candidate.StartTime - DateTime.Now).TotalSeconds
+                    Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
 
-                If diff <= 30 AndAlso diff >= -30 Then
+                    Dim diff =
+            (s.Candidate.StartTime - DateTime.Now).TotalSeconds
 
-                    Console.ForegroundColor = ConsoleColor.Green
+                    Dim mins = Math.Round(diff / 60)
+
                     Console.WriteLine(
-            $"START TRIGGER → {s.Candidate.Title} | {DateTime.Now}")
-                    Console.ResetColor()
+$"{s.Candidate.StartTime:HH:mm}   {ch.Item1,-22} {s.Candidate.Title,-30} {mins,4}m")
 
-                End If
+                    If diff <= 30 AndAlso diff >= -30 Then
+                        Console.ForegroundColor = ConsoleColor.Green
+                        Console.WriteLine()
+                        Console.WriteLine($"▶ RECORDING NOW → {s.Candidate.Title}")
+                        Console.ResetColor()
+                    End If
 
-            Next
+                Next
+
+                Thread.Sleep(5000)
+
+            End While
+
             Console.ResetColor()
 
             sw.Stop()
