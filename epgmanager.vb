@@ -230,6 +230,7 @@ Module Program
 
                             recordingLog.Add(msg)
 
+                            Log(msg)
                         End If
 
                     End If
@@ -777,6 +778,15 @@ ON guide(channel, start_utc, normalized_title);
         End If
 
         Console.WriteLine(text)
+
+    End Sub
+    Public Sub Log(msg As String)
+
+        Dim line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | {msg}"
+
+        Console.WriteLine(line)
+
+        File.AppendAllText("epgmanager.log", line & Environment.NewLine)
 
     End Sub
     Public Class ChannelInfo

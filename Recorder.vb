@@ -56,8 +56,9 @@ Public Module Recorder
 
         Try
             Dim duration =
-    CInt((endTime - DateTime.Now).TotalSeconds) +
-    END_PADDING_SECONDS
+CInt((endTime - startTime).TotalSeconds) +
+START_PADDING_SECONDS +
+END_PADDING_SECONDS
 
             If duration < 300 Then duration = 300
 
@@ -107,7 +108,9 @@ $"-fflags +discardcorrupt " &
 $"-err_detect ignore_err " &
 $"-i ""{streamUrl}"" " &
 $"-t {duration} " &
-$"-c:v copy -c:a copy " &
+$"-map 0 " &
+$"-c:v copy " &
+$"-c:a copy " &
 $"-movflags +faststart " &
 $"""{tmp}"""
 
@@ -117,7 +120,8 @@ $"""{tmp}"""
 
             Dim p As New Process
 
-            p.StartInfo.FileName = _ffmpegPath
+            p.StartInfo.FileName =
+                Path
             p.StartInfo.Arguments = args
             p.StartInfo.UseShellExecute = False
             p.StartInfo.CreateNoWindow = True
