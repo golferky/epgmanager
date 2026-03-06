@@ -218,6 +218,8 @@ Module Program
 
                             If String.IsNullOrWhiteSpace(streamId) Then Continue For
 
+                            Console.WriteLine("TRIGGERING RECORDER → " & s.Candidate.Title)
+
                             Recorder.RecordMovie(
         s.Candidate.Title,
         streamId,
