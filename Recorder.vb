@@ -104,12 +104,9 @@ $"-fflags +discardcorrupt " &
 $"-err_detect ignore_err " &
 $"-i ""{streamUrl}"" " &
 $"-t {duration} " &
-$"-c:v h264_videotoolbox " &
-$"-realtime true " &
-$"-q:v 65 " &
-$"-maxrate 6000k " &
-$"-bufsize 12000k " &
-$"-c:a aac -b:a 160k " &
+$"-map 0 " &
+$"-c copy " &
+$"-bsfs:a aac_adtstoasc " &
 $"-movflags +faststart " &
 $"""{tmp}"""
 
