@@ -59,6 +59,11 @@ Public Module Recorder
 CInt((endTime - startTime).TotalSeconds) +
 START_PADDING_SECONDS +
 END_PADDING_SECONDS
+            Console.WriteLine("Duration → " &
+                    CInt((endTime - startTime).TotalSeconds) & "-" &
+START_PADDING_SECONDS & "-" &
+END_PADDING_SECONDS
+)
 
             If duration < 300 Then duration = 300
 

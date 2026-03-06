@@ -198,7 +198,7 @@ Module Program
                 WriteLineClean("Start   Channel                        Title                              In")
                 WriteLineClean("--------------------------------------------------------------------------")
 
-                For Each s In planned.Take(10)
+                For Each s In planned.Take(1)
 
                     Dim key = s.Candidate.Channel & "|" & s.Candidate.StartTime
                     Dim diff = (s.Candidate.StartTime - DateTime.Now).TotalSeconds
@@ -230,7 +230,7 @@ Module Program
 
                             recordingLog.Add(msg)
 
-                            Log(msg)
+                            Log(ms)
                         End If
 
                     End If
