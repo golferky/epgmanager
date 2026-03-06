@@ -188,14 +188,21 @@ Module Program
 
                 If s.Score >= 70 Then
 
-                    Console.ForegroundColor = ConsoleColor.Green
+                    Console.ForegroundColor = ConsoleColor.DarkGreen
 
                     Console.WriteLine(
-        $"WOULD RECORD → {s.Candidate.Title} | " &
-        $"{s.Candidate.StartTime:MMM d HH:mm} | " &
-        $"{s.Candidate.Channel} | {ch.Item2}")
+    $"RECORDING TEST → {s.Candidate.Title}")
 
                     Console.ResetColor()
+
+                    Recorder.Record(
+        localMoviesDb,
+        s.Candidate.Channel,
+        s.Candidate.Title,
+        s.Candidate.StartTime,
+        120) ' record 120 seconds
+
+                    Exit For
 
                 End If
 
