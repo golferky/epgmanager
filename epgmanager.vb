@@ -169,6 +169,7 @@ Module Program
 .OrderBy(Function(x) x.Candidate.StartTime) _
 .Take(100)
             Dim recordingLog As New List(Of String)
+            Dim started As New HashSet(Of String)
 
             While True
 
@@ -195,23 +196,30 @@ Module Program
                 Console.ResetColor()
                 For Each s In planned.Take(10)
 
-                    Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
+                    Dim key = s.Candidate.Channel & "|" & s.Candidate.StartTime
 
-                    Dim diff =
-            (s.Candidate.StartTime - DateTime.Now).TotalSeconds
+                    If diff <= 30 AndAlso diff >= -30 AndAlso Not started.Contains(key) Then
 
-                    Dim mins = Math.Round(diff / 60)
+                        started.Add(key)
 
-                    Console.WriteLine(
-$"{s.Candidate.StartTime:HH:mm}   {ch.Item1,-22} {s.Candidate.Title,-30} {mins,4}m")
+                        Dim streamId = ChannelLookup.GetStreamId(localMoviesDb, s.Candidate.Channel)
 
-                    If diff <= 30 AndAlso diff >= -30 Then
-                        Console.ForegroundColor = ConsoleColor.Green
-                        Dim msg =
-$"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
+                        If String.IsNullOrWhiteSpace(streamId) Then
+                            Continue For
+                        End If
+
+                        Recorder.RecordMovie(
+        s.Candidate.Title,
+        streamId,
+        s.Candidate.StartTime,
+        s.Candidate.EndTime)
+
+                        Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
+
+                        Dim msg = $"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
 
                         recordingLog.Add(msg)
-                        Console.ResetColor()
+
                     End If
 
                 Next
