@@ -201,6 +201,12 @@ Module Program
             sw.Stop()
 
             Console.WriteLine(vbCrLf & "--------------------------------------------------------------------------------")
+            Console.WriteLine()
+            Console.WriteLine("Scheduler active... waiting for start times")
+
+            While True
+                Thread.Sleep(1000)
+            End While
             Console.WriteLine("DONE. Time: " & sw.Elapsed.Minutes & "m " & sw.Elapsed.Seconds & "s")
 
             Console.WriteLine("Press Enter to exit.")
