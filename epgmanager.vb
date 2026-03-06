@@ -171,43 +171,31 @@ Module Program
 
             For Each s In planned
 
-                Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
+                Dim owned = IsOwned(localHistoryDb, s.Candidate.Title)
 
-                Dim streamId =
-    ChannelLookup.GetStreamId(localMoviesDb, s.Candidate.Channel)
-
-                If String.IsNullOrWhiteSpace(streamId) Then
-                    Console.WriteLine("No stream mapping → " & s.Candidate.Channel)
-                    Continue For
+                If owned Then
+                    Console.ForegroundColor = ConsoleColor.DarkGray
+                Else
+                    Console.ForegroundColor = ConsoleColor.White
                 End If
 
-                If PlexLibrary.MovieExists(s.Candidate.Title) Then
-                    Console.WriteLine("Already in Plex → " & s.Candidate.Title)
-                    Continue For
-                End If
+                Console.WriteLine(
+    $"{s.Score,3} | {s.Candidate.StartTime:dddd MMM d HH:mm} | " &
+    $"{s.Candidate.Channel,-10} | {s.Candidate.Title} {s.Reason}")
 
-                If s.Score >= 70 Then
+                Dim diff =
+        (s.Candidate.StartTime - DateTime.Now).TotalSeconds
 
-                    Console.ForegroundColor = ConsoleColor.DarkGreen
+                If diff <= 30 AndAlso diff >= -30 Then
 
+                    Console.ForegroundColor = ConsoleColor.Green
                     Console.WriteLine(
-    $"RECORDING TEST → {s.Candidate.Title}")
-
+            $"START TRIGGER → {s.Candidate.Title} | {DateTime.Now}")
                     Console.ResetColor()
-
-                    Recorder.Record(
-        localMoviesDb,
-        s.Candidate.Channel,
-        s.Candidate.Title,
-        s.Candidate.StartTime,
-        120) ' record 120 seconds
-
-                    Exit For
 
                 End If
 
             Next
-
             Console.ResetColor()
 
             sw.Stop()
