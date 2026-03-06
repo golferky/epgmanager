@@ -47,9 +47,12 @@ Public Module Recorder
         If wait.TotalSeconds > 0 Then
             Thread.Sleep(wait.TotalMilliseconds)
         End If
-
         ' throttle
+        Console.WriteLine("Waiting for recorder slot → " & title)
+
         _recordingLimiter.WaitAsync().Wait()
+
+        Console.WriteLine("Recorder slot acquired → " & title)
 
         Try
             Dim duration =

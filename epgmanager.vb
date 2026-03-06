@@ -45,7 +45,7 @@ Module Program
 
         Console.Title = "EPG Manager v" & version
         Console.WriteLine("EPG MANAGER v" & version & " | STARTED: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))
-
+        
         Dim sw As Stopwatch = Stopwatch.StartNew()
 
         Try
@@ -61,11 +61,8 @@ Module Program
             Dim localMoviesDb = DbCache.GetLocalCopy(_DbPath)
 
             Console.WriteLine("Original DB: " & _DbPath)
-            Console.WriteLine("Local DB copy: " & localMoviesDb)
 
-            If File.Exists(localMoviesDb) Then
-                Console.WriteLine("Local DB size: " & New FileInfo(localMoviesDb).Length & " bytes")
-            Else
+            If Not File.Exists(localMoviesDb) Then
                 Console.WriteLine("Local DB DOES NOT EXIST")
             End If
 
