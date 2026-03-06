@@ -173,56 +173,52 @@ Module Program
 
             Console.CursorVisible = False
 
+            Dim dashboardHeight As Integer = 30
+
             While True
 
-                Console.SetCursorPosition(0, 0)
+                Console.SetCursorPosition(0, dashboardTop)
 
-                Console.WriteLine("EPG MANAGER DVR")
-                Console.WriteLine("---------------------------------------------------------------")
-                Console.WriteLine($"Now: {DateTime.Now:dddd MMM d HH:mm:ss}")
-                Console.WriteLine()
-
-                Console.WriteLine("NEXT RECORDINGS")
-                Console.WriteLine("---------------------------------------------------------------")
-                Console.WriteLine("Start   Channel                 Title                          In")
-                Console.WriteLine("---------------------------------------------------------------")
-                Console.WriteLine()
-                Console.WriteLine("ACTIVE / STARTED RECORDINGS")
-                Console.WriteLine("---------------------------------------------------------------")
-
-                For Each r In recordingLog
-                    Console.ForegroundColor = ConsoleColor.Green
-                    Console.WriteLine(r)
+                ' Clear dashboard area
+                For i = 1 To dashboardHeight
+                    WriteLineClean("")
                 Next
 
-                Console.ResetColor()
+                Console.SetCursorPosition(0, dashboardTop)
+
+                WriteLineClean($"Now: {DateTime.Now:ddd MMM d HH:mm:ss}")
+                WriteLineClean("")
+
+                WriteLineClean("NEXT RECORDINGS")
+                WriteLineClean("--------------------------------------------------------------------------")
+                WriteLineClean("Start   Channel                        Title                              In")
+                WriteLineClean("--------------------------------------------------------------------------")
+
                 For Each s In planned.Take(10)
 
                     Dim key = s.Candidate.Channel & "|" & s.Candidate.StartTime
-
                     Dim diff = (s.Candidate.StartTime - DateTime.Now).TotalSeconds
 
                     Dim mins = Math.Floor(diff / 60)
                     Dim secs = diff Mod 60
+
                     Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
 
-                    Console.WriteLine($"{s.Candidate.StartTime:HH:mm}   {ch.Item1,-22} {s.Candidate.Title,-30} {mins,2}:{secs:00}")
+                    WriteLineClean($"{s.Candidate.StartTime:HH:mm}   {ch.Item1,-30} {s.Candidate.Title,-35} {mins,2}:{secs:00}")
 
-                    If diff <= 30 AndAlso diff >= -30 AndAlso Not started.Contains(key) Then
+                    If diff <= 60 AndAlso diff >= -120 AndAlso Not started.Contains(key) Then
 
                         started.Add(key)
 
                         Dim streamId = ChannelLookup.GetStreamId(localMoviesDb, s.Candidate.Channel)
 
-                        If String.IsNullOrWhiteSpace(streamId) Then
-                            Continue For
-                        End If
+                        If String.IsNullOrWhiteSpace(streamId) Then Continue For
 
                         Recorder.RecordMovie(
-        s.Candidate.Title,
-        streamId,
-        s.Candidate.StartTime,
-        s.Candidate.EndTime)
+                s.Candidate.Title,
+                streamId,
+                s.Candidate.StartTime,
+                s.Candidate.EndTime)
 
                         Dim msg = $"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
 
@@ -231,6 +227,18 @@ Module Program
                     End If
 
                 Next
+
+                WriteLineClean("")
+                WriteLineClean("ACTIVE / STARTED RECORDINGS")
+                WriteLineClean("--------------------------------------------------------------------------")
+
+                Console.ForegroundColor = ConsoleColor.Green
+
+                For Each r In recordingLog
+                    WriteLineClean(r)
+                Next
+
+                Console.ResetColor()
 
                 Thread.Sleep(5000)
 
@@ -752,6 +760,16 @@ ON guide(channel, start_utc, normalized_title);
             Next
 
         End Using
+
+    End Sub
+    Private Sub WriteLineClean(text As String)
+
+        If text.Length < Console.WindowWidth Then
+            text &= New String(" "c, Console.WindowWidth - text.Length)
+        End If
+
+        Console.WriteLine(text)
+
     End Sub
     Public Class ChannelInfo
         Public Property Nickname As String
