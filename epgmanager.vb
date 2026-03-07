@@ -784,7 +784,7 @@ ON guide(channel, start_utc, normalized_title);
         Console.WriteLine(text)
 
     End Sub
-    Private Sub Log(msg As String)
+    Public Sub Log(msg As String)
 
         Try
 
