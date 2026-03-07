@@ -30,10 +30,10 @@ Public Module Recorder
         Dim paddedStart = startTime.AddSeconds(-START_PADDING_SECONDS)
         Dim wait = paddedStart - DateTime.Now
 
-        If wait.TotalSeconds > 0 Then
-            Console.WriteLine($"Waiting {CInt(wait.TotalSeconds)} sec → {title}")
-            Thread.Sleep(wait)
-        End If
+        'If wait.TotalSeconds > 0 Then
+        '    Console.WriteLine($"Waiting {CInt(wait.TotalSeconds)} sec → {title}")
+        '    Thread.Sleep(wait)
+        'End If
 
         ' Limit concurrent recordings
         Console.WriteLine("Waiting for recorder slot → " & title)
