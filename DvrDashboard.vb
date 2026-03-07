@@ -7,6 +7,7 @@ Public Module DvrDashboard
     Public Class ActiveRecording
         Public Property Title As String
         Public Property Channel As String
+        Public Property StartTime As DateTime
         Public Property EndTime As DateTime
     End Class
 
