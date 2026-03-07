@@ -257,13 +257,25 @@ Module Program
                 Next
 
                 WriteLineClean("")
-                WriteLineClean("ACTIVE / STARTED RECORDINGS")
+                WriteLineClean("ACTIVE RECORDINGS")
                 WriteLineClean("--------------------------------------------------------------------------")
 
                 Console.ForegroundColor = ConsoleColor.Green
 
-                For Each r In recordingLog
-                    WriteLineClean(r)
+                For Each r In activeRecordings.ToList()
+
+                    Dim remaining = r.EndTime - DateTime.Now
+
+                    If remaining.TotalSeconds <= 0 Then
+                        activeRecordings.Remove(r)
+                        Continue For
+                    End If
+
+                    Dim mins = CInt(Math.Floor(remaining.TotalMinutes))
+                    Dim secs = remaining.Seconds
+
+                    WriteLineClean($"{r.Channel,-25} {r.Title,-35} {mins}:{secs:00} left")
+
                 Next
 
                 Console.ResetColor()

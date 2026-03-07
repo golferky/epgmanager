@@ -6,7 +6,7 @@ Imports System.Threading.Tasks
 Public Module Recorder
 
     Private Const START_PADDING_SECONDS As Integer = 60
-    Private Const END_PADDING_SECONDS As Integer = 300
+    Private Const END_PADDING_SECONDS As Integer = 900
 
     'this allows 10 concurrent recordings, which is the max Plex Pass limit. If you have more tuners, you can increase this.    
     Private ReadOnly _recordingLimiter As New SemaphoreSlim(10)
