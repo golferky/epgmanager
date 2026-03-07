@@ -784,13 +784,24 @@ ON guide(channel, start_utc, normalized_title);
         Console.WriteLine(text)
 
     End Sub
-    Public Sub Log(msg As String)
+    Private Sub Log(msg As String)
 
-        Dim line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | {msg}"
+        Try
 
-        Console.WriteLine(line)
+            Dim dir = Path.GetDirectoryName(LOG_FILE)
 
-        File.AppendAllText("epgmanager.log", line & Environment.NewLine)
+            If Not Directory.Exists(dir) Then
+                Directory.CreateDirectory(dir)
+            End If
+
+            Dim line =
+            $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | {msg}"
+
+            File.AppendAllText(LOG_FILE, line & Environment.NewLine)
+
+        Catch
+            ' avoid crashing recorder if logging fails
+        End Try
 
     End Sub
     Public Class ChannelInfo
