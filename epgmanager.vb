@@ -275,19 +275,16 @@ Module Program
 
                 Console.ForegroundColor = ConsoleColor.Green
 
-                For Each kv In DvrDashboard.activeRecordings
+                For Each r In DvrDashboard.activeRecordings
 
-                    Dim title = kv.Key
-                    Dim endTime = CType(kv.Value, DateTime)
-
-                    Dim remaining = endTime - DateTime.Now
+                    Dim remaining = r.EndTime - DateTime.Now
 
                     If remaining.TotalSeconds < 0 Then Continue For
 
                     Dim mins = Math.Floor(remaining.TotalMinutes)
                     Dim secs = remaining.Seconds
 
-                    WriteLineClean($"{title,-40} ends {endTime:HH:mm}   left {mins,2}:{secs:00}")
+                    WriteLineClean($"{r.Title,-40} {r.StartTime:HH:mm} → {r.EndTime:HH:mm}   left {mins,2}:{secs:00}")
 
                 Next
 
