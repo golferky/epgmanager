@@ -10,7 +10,7 @@ Public Module DvrDashboard
         Public Property EndTime As DateTime
     End Class
 
-    Private activeRecordings As New List(Of ActiveRecording)
+    Public activeRecordings As New List(Of ActiveRecording)
 
     Public Sub AddRecording(title As String, channel As String, endTime As DateTime)
 
