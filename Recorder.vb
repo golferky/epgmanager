@@ -10,6 +10,8 @@ Public Module Recorder
 
     Private ReadOnly _recordingLimiter As New SemaphoreSlim(3)
 
+    Private LOG_FILE As String = "/Users/garyscudder/epg/logs/recordings.log"
+
     Public Sub RecordMovie(title As String,
                            streamId As String,
                            startTime As DateTime,
@@ -76,7 +78,7 @@ Public Module Recorder
             Console.WriteLine("Starting recording → " & streamUrl)
 
             Dim args =
-$"-nostdin -loglevel error " &
+$"-nostdin -loglevel info " &
 $"-user_agent ""{_userAgent}"" " &
 $"-thread_queue_size 1024 " &
 $"-reconnect 1 " &
@@ -94,16 +96,46 @@ $"""{tmp}"""
 
             Dim p As New Process()
 
+            p.EnableRaisingEvents = True
+
             p.StartInfo.FileName = _ffmpegPath
             p.StartInfo.Arguments = args
             p.StartInfo.UseShellExecute = False
             p.StartInfo.CreateNoWindow = True
 
+            ' Capture ffmpeg logs
+            p.StartInfo.RedirectStandardError = True
+            p.StartInfo.RedirectStandardOutput = True
+
+            AddHandler p.Exited,
+Sub()
+    Log("FFMPEG EXIT → " & title)
+End Sub
+
+            AddHandler p.ErrorDataReceived,
+Sub(sender, e)
+    If e.Data IsNot Nothing Then
+        Log("FFMPEG → " & e.Data)
+    End If
+End Sub
+
+            AddHandler p.OutputDataReceived,
+Sub(sender, e)
+    If e.Data IsNot Nothing Then
+        Log("FFMPEG → " & e.Data)
+    End If
+End Sub
+
+            Log("FFMPEG CMD → " & _ffmpegPath & " " & args)
+
             p.Start()
 
-            Console.WriteLine("Recording → " & safeTitle)
+            p.BeginErrorReadLine()
+            p.BeginOutputReadLine()
 
-            p.WaitForExit()
+            Log("FFMPEG STARTED → PID " & p.Id & " | " & title)
+
+            Console.WriteLine("Recording → " & safeTitle)
 
             If File.Exists(tmp) Then
                 File.Move(tmp, output, True)
