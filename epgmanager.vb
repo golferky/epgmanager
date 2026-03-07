@@ -40,6 +40,8 @@ Module Program
     Private _localDb As String = ""
     Private _localHist As String = ""
 
+    Private shutdownRequested As Boolean = False
+
     Sub Main(args As String())
 
         Dim version = Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString()
@@ -178,6 +180,17 @@ Module Program
 
             While True
 
+                ' Allow graceful shutdown
+                If Console.KeyAvailable Then
+                    Dim key = Console.ReadKey(True)
+
+                    If key.Key = ConsoleKey.Q Then
+                        shutdownRequested = True
+                        Console.WriteLine()
+                        Console.WriteLine("Graceful shutdown requested...")
+                    End If
+                End If
+
                 Console.SetCursorPosition(0, dashboardTop)
 
                 For i = 0 To dashboardHeight - 1
@@ -187,13 +200,9 @@ Module Program
 
                 Console.SetCursorPosition(0, dashboardTop)
 
-                For i = 1 To dashboardHeight
-                    WriteLineClean("")
-                Next
-
-                Console.SetCursorPosition(0, dashboardTop)
-
                 WriteLineClean($"Now: {DateTime.Now:ddd MMM d HH:mm:ss}")
+                WriteLineClean("")
+                WriteLineClean("Press Q to shutdown safely")
                 WriteLineClean("")
 
                 WriteLineClean("NEXT RECORDINGS")
@@ -201,7 +210,6 @@ Module Program
                 WriteLineClean("Start   Channel                        Title                              In")
                 WriteLineClean("--------------------------------------------------------------------------")
 
-                ' DISPLAY ONLY NEXT UPCOMING MOVIE
                 Dim nextMovie = planned.FirstOrDefault()
 
                 If nextMovie IsNot Nothing Then
@@ -216,16 +224,21 @@ Module Program
 
                 End If
 
-                ' SCHEDULER LOGIC
+                ' ---------------------------
+                ' Scheduler logic
+                ' ---------------------------
+
                 For Each s In planned
 
+                    If shutdownRequested Then Continue For
+
                     Dim key =
-                s.Candidate.Channel & "|" &
-                s.Candidate.StartTime.ToString("yyyyMMddHHmm")
+            s.Candidate.Channel & "|" &
+            s.Candidate.StartTime.ToString("yyyyMMddHHmm")
 
                     Dim diff = (s.Candidate.StartTime - DateTime.Now).TotalSeconds
 
-                    If diff <= 30 AndAlso diff >= -30 Then
+                    If diff <= 120 AndAlso diff >= -120 Then
 
                         If started.Add(key) Then
 
@@ -238,13 +251,13 @@ Module Program
                             Console.WriteLine("TRIGGERING RECORDER → " & s.Candidate.Title)
 
                             Recorder.RecordMovie(
-                        s.Candidate.Title,
-                        streamId,
-                        s.Candidate.StartTime,
-                        s.Candidate.EndTime)
+                    s.Candidate.Title,
+                    streamId,
+                    s.Candidate.StartTime,
+                    s.Candidate.EndTime)
 
                             Dim msg =
-                        $"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
+                    $"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
 
                             recordingLog.Add(msg)
 
@@ -257,32 +270,34 @@ Module Program
                 Next
 
                 WriteLineClean("")
-                WriteLineClean("ACTIVE RECORDINGS")
+                WriteLineClean("ACTIVE / STARTED RECORDINGS")
                 WriteLineClean("--------------------------------------------------------------------------")
 
                 Console.ForegroundColor = ConsoleColor.Green
 
-                For Each r In activeRecordings.ToList()
-
-                    Dim remaining = r.EndTime - DateTime.Now
-
-                    If remaining.TotalSeconds <= 0 Then
-                        activeRecordings.Remove(r)
-                        Continue For
-                    End If
-
-                    Dim mins = CInt(Math.Floor(remaining.TotalMinutes))
-                    Dim secs = remaining.Seconds
-
-                    WriteLineClean($"{r.Channel,-25} {r.Title,-35} {mins}:{secs:00} left")
-
+                For Each r In recordingLog
+                    WriteLineClean(r)
                 Next
 
                 Console.ResetColor()
 
+                If shutdownRequested Then
+                    WriteLineClean($"Waiting for {DvrDashboard.activeRecordings.Count} recordings to finish...")
+                End If
+
+                ' Exit once shutdown requested and no recordings active
+                If shutdownRequested AndAlso DvrDashboard.activeRecordings.Count = 0 Then
+                    Exit While
+                End If
+
                 Thread.Sleep(5000)
 
             End While
+
+            CleanupTempFiles()
+
+            Console.WriteLine()
+            Console.WriteLine("EPG Manager stopped safely.")
 
         Catch ex As Exception
             Console.WriteLine("FATAL ERROR:")
@@ -290,7 +305,38 @@ Module Program
         End Try
 
     End Sub
+    Private Sub CleanupTempFiles()
 
+        Dim tmpFiles = Directory.GetFiles(_plexMoviesPath, "*.tmpmp4", SearchOption.AllDirectories)
+
+        If tmpFiles.Length = 0 Then
+            Console.WriteLine("No orphan temp files found.")
+            Return
+        End If
+
+        Console.WriteLine()
+        Console.WriteLine($"Found {tmpFiles.Length} unfinished recordings.")
+        Console.Write("Delete them? (Y/N): ")
+
+        Dim key = Console.ReadKey().Key
+        Console.WriteLine()
+
+        If key = ConsoleKey.Y Then
+
+            For Each f In tmpFiles
+
+                Try
+                    File.Delete(f)
+                    Console.WriteLine($"Deleted {f}")
+                Catch ex As Exception
+                    Console.WriteLine($"Could not delete {f}")
+                End Try
+
+            Next
+
+        End If
+
+    End Sub
     ' --- DOWNLOAD LOGIC (USER ARCHIVE VERSION) ---
     Async Function DownloadGuideProperly(url As String, localPath As String) As Task
 
