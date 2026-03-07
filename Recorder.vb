@@ -14,11 +14,22 @@ Public Module Recorder
     Public LOG_FILE As String = "/Users/garyscudder/epg/logs/recordings.log"
 
     Public Sub RecordMovie(title As String,
-                           streamId As String,
-                           startTime As DateTime,
-                           endTime As DateTime)
+                       streamId As String,
+                       startTime As DateTime,
+                       endTime As DateTime)
 
-        Task.Run(Sub() RunRecording(title, streamId, startTime, endTime))
+        If Not _recordingLimiter.Wait(0) Then
+            Log("SKIPPED → No recording slot → " & title)
+            Return
+        End If
+
+        Task.Run(Sub()
+                     Try
+                         RunRecording(title, streamId, startTime, endTime)
+                     Finally
+                         _recordingLimiter.Release()
+                     End Try
+                 End Sub)
 
     End Sub
 
@@ -28,14 +39,6 @@ Public Module Recorder
                              streamId As String,
                              startTime As DateTime,
                              endTime As DateTime)
-
-        ' Acquire recording slot immediately
-        Console.WriteLine("Waiting for recorder slot → " & title)
-
-        If Not _recordingLimiter.Wait(0) Then
-            Log("SKIPPED → No recording slot → " & title)
-            Return
-        End If
 
         Console.WriteLine("Recorder slot acquired → " & title)
 
@@ -161,8 +164,6 @@ Public Module Recorder
             Log("ERROR → " & ex.Message)
 
         Finally
-
-            _recordingLimiter.Release()
 
         End Try
 
