@@ -9,7 +9,7 @@ Public Module Recorder
     Private Const END_PADDING_SECONDS As Integer = 900
 
     'this allows 10 concurrent recordings, which is the max Plex Pass limit. If you have more tuners, you can increase this.    
-    Private ReadOnly _recordingLimiter As New SemaphoreSlim(10)
+    Private ReadOnly recordingLimiter As New SemaphoreSlim(10)
 
     Public LOG_FILE As String = "/Users/garyscudder/epg/logs/recordings.log"
 
@@ -33,7 +33,7 @@ Public Module Recorder
 
     End Sub
 
-    Public Shared _activeTitles As New HashSet(Of String)
+    Private Shared _activeTitles As New HashSet(Of String)
 
     Private Sub RunRecording(title As String,
                              streamId As String,
