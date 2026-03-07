@@ -8,7 +8,8 @@ Public Module Recorder
     Private Const START_PADDING_SECONDS As Integer = 60
     Private Const END_PADDING_SECONDS As Integer = 300
 
-    Private ReadOnly _recordingLimiter As New SemaphoreSlim(3)
+    'this allows 10 concurrent recordings, which is the max Plex Pass limit. If you have more tuners, you can increase this.    
+    Private ReadOnly _recordingLimiter As New SemaphoreSlim(10)
 
     Public LOG_FILE As String = "/Users/garyscudder/epg/logs/recordings.log"
 
@@ -21,28 +22,35 @@ Public Module Recorder
 
     End Sub
 
+    Private Shared _activeTitles As New HashSet(Of String)
+
     Private Sub RunRecording(title As String,
                              streamId As String,
                              startTime As DateTime,
                              endTime As DateTime)
 
-        ' Wait until airtime (with padding)
-        Dim paddedStart = startTime.AddSeconds(-START_PADDING_SECONDS)
-        Dim wait = paddedStart - DateTime.Now
-
-        If wait.TotalSeconds > 0 Then
-            Console.WriteLine($"Waiting {CInt(wait.TotalSeconds)} sec → {title}")
-            Thread.Sleep(wait)
-        End If
-
-        ' Limit concurrent recordings
+        ' Acquire recording slot immediately
         Console.WriteLine("Waiting for recorder slot → " & title)
-        _recordingLimiter.Wait()
+
+        If Not _recordingLimiter.Wait(0) Then
+            Log("SKIPPED → No recording slot → " & title)
+            Return
+        End If
 
         Console.WriteLine("Recorder slot acquired → " & title)
 
         Try
 
+            ' Wait until airtime (with padding)
+            Dim paddedStart = startTime.AddSeconds(-START_PADDING_SECONDS)
+            Dim wait = paddedStart - DateTime.Now
+
+            If wait.TotalSeconds > 0 Then
+                Console.WriteLine($"Waiting {CInt(wait.TotalSeconds)} sec → {title}")
+                Thread.Sleep(wait)
+            End If
+
+            ' Calculate recording duration
             Dim duration As Integer =
                 CInt((endTime - startTime).TotalSeconds) +
                 START_PADDING_SECONDS +
@@ -52,7 +60,7 @@ Public Module Recorder
 
             Console.WriteLine($"Recording duration → {duration} sec")
 
-            ' Clean title
+            ' Clean title for filesystem
             Dim safeTitle = title.Replace(":", "") _
                                  .Replace("/", "") _
                                  .Replace("?", "") _
@@ -72,28 +80,28 @@ Public Module Recorder
             Dim tmp = Path.Combine(movieFolder, safeTitle & ".tmp.mp4")
             Dim output = Path.Combine(movieFolder, safeTitle & ".mp4")
 
-            'm3u8 caused issues with ffmpeg aborting when multiple streams, so switched to direct stream url
-            'Dim streamUrl = $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.m3u8"
-            Dim streamUrl = $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.ts"
+            ' Direct stream URL (stable for IPTV)
+            Dim streamUrl =
+                $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.ts"
 
             Console.WriteLine("Starting recording → " & streamUrl)
 
             Dim args =
-$"-nostdin -loglevel info " &
-$"-user_agent ""{_userAgent}"" " &
-$"-thread_queue_size 1024 " &
-$"-reconnect 1 " &
-$"-reconnect_streamed 1 " &
-$"-reconnect_delay_max 5 " &
-$"-fflags +discardcorrupt " &
-$"-err_detect ignore_err " &
-$"-i ""{streamUrl}"" " &
-$"-t {duration} " &
-$"-map 0 " &
-$"-c:v copy " &
-$"-c:a copy " &
-$"-movflags +faststart " &
-$"""{tmp}"""
+    $"-nostdin -loglevel info " &
+    $"-user_agent ""{_userAgent}"" " &
+    $"-thread_queue_size 1024 " &
+    $"-reconnect 1 " &
+    $"-reconnect_streamed 1 " &
+    $"-reconnect_at_eof 1 " &
+    $"-reconnect_delay_max 10 " &
+    $"-fflags +discardcorrupt " &
+    $"-err_detect ignore_err " &
+    $"-i ""{streamUrl}"" " &
+    $"-t {duration} " &
+    $"-map 0 " &
+    $"-c copy " &
+    $"-movflags +faststart " &
+    $"""{tmp}"""
 
             Dim p As New Process()
 
@@ -103,29 +111,28 @@ $"""{tmp}"""
             p.StartInfo.Arguments = args
             p.StartInfo.UseShellExecute = False
             p.StartInfo.CreateNoWindow = True
-
-            ' Capture ffmpeg logs
             p.StartInfo.RedirectStandardError = True
             p.StartInfo.RedirectStandardOutput = True
 
-            AddHandler p.Exited,
-Sub()
-    Log("FFMPEG EXIT → " & title)
-End Sub
-
+            ' Capture ffmpeg logs
             AddHandler p.ErrorDataReceived,
-Sub(sender, e)
-    If e.Data IsNot Nothing Then
-        Log("FFMPEG → " & e.Data)
-    End If
-End Sub
+            Sub(sender, e)
+                If e.Data IsNot Nothing Then
+                    Log("FFMPEG → " & e.Data)
+                End If
+            End Sub
 
             AddHandler p.OutputDataReceived,
-Sub(sender, e)
-    If e.Data IsNot Nothing Then
-        Log("FFMPEG → " & e.Data)
-    End If
-End Sub
+            Sub(sender, e)
+                If e.Data IsNot Nothing Then
+                    Log("FFMPEG → " & e.Data)
+                End If
+            End Sub
+
+            AddHandler p.Exited,
+            Sub()
+                Log("FFMPEG EXIT → " & title)
+            End Sub
 
             Log("FFMPEG CMD → " & _ffmpegPath & " " & args)
 
@@ -138,14 +145,20 @@ End Sub
 
             Console.WriteLine("Recording → " & safeTitle)
 
+            ' Wait until ffmpeg completes
+            p.WaitForExit()
+
+            ' Rename temp file to final output
             If File.Exists(tmp) Then
                 File.Move(tmp, output, True)
                 Console.WriteLine("Completed → " & output)
+                Log("COMPLETED → " & output)
             End If
 
         Catch ex As Exception
 
             Console.WriteLine("Recording error → " & ex.Message)
+            Log("ERROR → " & ex.Message)
 
         Finally
 
