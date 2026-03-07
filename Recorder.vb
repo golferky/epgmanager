@@ -30,10 +30,10 @@ Public Module Recorder
         Dim paddedStart = startTime.AddSeconds(-START_PADDING_SECONDS)
         Dim wait = paddedStart - DateTime.Now
 
-        'If wait.TotalSeconds > 0 Then
-        '    Console.WriteLine($"Waiting {CInt(wait.TotalSeconds)} sec → {title}")
-        '    Thread.Sleep(wait)
-        'End If
+        If wait.TotalSeconds > 0 Then
+            Console.WriteLine($"Waiting {CInt(wait.TotalSeconds)} sec → {title}")
+            Thread.Sleep(wait)
+        End If
 
         ' Limit concurrent recordings
         Console.WriteLine("Waiting for recorder slot → " & title)
@@ -72,8 +72,9 @@ Public Module Recorder
             Dim tmp = Path.Combine(movieFolder, safeTitle & ".tmp.mp4")
             Dim output = Path.Combine(movieFolder, safeTitle & ".mp4")
 
-            Dim streamUrl =
-                $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.m3u8"
+            'm3u8 caused issues with ffmpeg aborting when multiple streams, so switched to direct stream url
+            'Dim streamUrl = $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.m3u8"
+            Dim streamUrl = $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.ts"
 
             Console.WriteLine("Starting recording → " & streamUrl)
 
