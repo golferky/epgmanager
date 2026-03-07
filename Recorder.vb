@@ -33,7 +33,7 @@ Public Module Recorder
 
     End Sub
 
-    Private Shared _activeTitles As New HashSet(Of String)
+    Public Shared _activeTitles As New HashSet(Of String)
 
     Private Sub RunRecording(title As String,
                              streamId As String,
