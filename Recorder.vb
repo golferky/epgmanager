@@ -45,7 +45,7 @@ Public Module Recorder
         Dim wait = paddedStart - DateTime.Now
 
         If wait.TotalSeconds > 0 Then
-            Thread.Sleep(wait.TotalMilliseconds)
+            Thread.Sleep(TimeSpan.FromSeconds(wait.TotalSeconds))
         End If
         ' throttle
         Console.WriteLine("Waiting for recorder slot → " & title)
@@ -101,7 +101,7 @@ END_PADDING_SECONDS
 
             Dim streamUrl =
                 $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.m3u8"
-            Console.Writeline("Starting recording → " & streamUrl)
+            Console.WriteLine("Starting recording → " & streamUrl)
             Dim args =
 $"-nostdin -loglevel error " &
 $"-user_agent ""{_userAgent}"" " &
@@ -132,10 +132,21 @@ $"""{tmp}"""
 
             Console.WriteLine("Recording → " & safeTitle)
 
-            p.Start()
-            p.WaitForExit()
+                p.EnableRaisingEvents = True
+                AddHandler p.Exited, Sub()
+                                         Try
+                                             If File.Exists(tmp) Then
+                                                 File.Move(tmp, output)
+                                                 Console.WriteLine("Completed → " & output)
+                                             End If
+                                         Finally
+                                             _recordingLimiter.Release()
+                                         End Try
+                                     End Sub
 
-            If File.Exists(tmp) Then
+            p.Start()
+
+            If p.ExitCode = 0 AndAlso File.Exists(tmp) Then
                 File.Move(tmp, output)
                 Console.WriteLine("Completed → " & output)
             End If

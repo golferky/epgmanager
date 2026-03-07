@@ -41,11 +41,12 @@ Module Program
     Private _localHist As String = ""
 
     Sub Main(args As String())
+
         Dim version = Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString()
 
         Console.Title = "EPG Manager v" & version
         Console.WriteLine("EPG MANAGER v" & version & " | STARTED: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))
-        
+
         Dim sw As Stopwatch = Stopwatch.StartNew()
 
         Try
@@ -58,6 +59,7 @@ Module Program
             ' ---------------------------------------------------
             ' 1️⃣ UPDATE STREAM IDS
             ' ---------------------------------------------------
+
             Dim localMoviesDb = DbCache.GetLocalCopy(_DbPath)
 
             Console.WriteLine("Original DB: " & _DbPath)
@@ -71,7 +73,7 @@ Module Program
             Dim json = GetXtreamJson(_epgUrl, _epgUser, _epgPass, _userAgent).Result
 
             Dim streams =
-            Newtonsoft.Json.JsonConvert.DeserializeObject(Of List(Of XtreamStream))(json)
+        Newtonsoft.Json.JsonConvert.DeserializeObject(Of List(Of XtreamStream))(json)
 
             UpdateStreamIds(_epgUrl, _epgUser, _epgPass, streams, localMoviesDb)
 
@@ -87,7 +89,7 @@ Module Program
             Dim stampFile = Path.Combine(_guideDir, "last_import.txt")
 
             Dim guideUrl =
-            $"{_epgUrl}{_epgXMLTV}?username={_epgUser}&password={_epgPass}"
+        $"{_epgUrl}{_epgXMLTV}?username={_epgUser}&password={_epgPass}"
 
             Dim localPath = Path.Combine(_guideDir, "guide.xml")
 
@@ -97,8 +99,8 @@ Module Program
             DownloadGuideProperly(guideUrl, localPath).Wait()
 
             Dim needsImport As Boolean =
-            GuideUpdateDetector.GuideNeedsUpdate(_guideDir, stampFile) _
-            OrElse GuideDbIsEmpty(localGuideDb)
+        GuideUpdateDetector.GuideNeedsUpdate(_guideDir, stampFile) _
+        OrElse GuideDbIsEmpty(localGuideDb)
 
             If needsImport Then
 
@@ -133,11 +135,11 @@ Module Program
             Dim stats As New EngineStats
 
             Dim candidates =
-            GuideQueryEngine.GetUpcomingCandidates(
-                localGuideDb,
-                localHistoryDb,
-                localMoviesDb,
-                stats)
+        GuideQueryEngine.GetUpcomingCandidates(
+            localGuideDb,
+            localHistoryDb,
+            localMoviesDb,
+            stats)
 
             Console.WriteLine("Candidates found: " & candidates.Count)
 
@@ -153,18 +155,19 @@ Module Program
             Console.WriteLine("Movie channels loaded: " & myChannels.Count)
 
             Dim planned = scored _
-.Where(Function(x) myChannels.Contains(x.Candidate.Channel)) _
-.Where(Function(x) Not ChannelLookup.IsForeign(localMoviesDb, x.Candidate.Channel)) _
-.Where(Function(x) ChannelLookup.IsMovieChannel(localMoviesDb, x.Candidate.Channel)) _
-.Where(Function(x) x.Candidate.StartTime > DateTime.Now) _
-.GroupBy(Function(x) NormalizeTitle(x.Candidate.Title)) _
-.Select(Function(g) g _
-    .OrderByDescending(Function(m) TitleHelpers.GetChannelPriority(m.Candidate.Channel)) _
-    .ThenByDescending(Function(m) m.Candidate.Channel.ToLower().Contains("hd")) _
-    .ThenBy(Function(m) m.Candidate.StartTime) _
-    .First()) _
-.OrderBy(Function(x) x.Candidate.StartTime) _
-.Take(100)
+        .Where(Function(x) myChannels.Contains(x.Candidate.Channel)) _
+        .Where(Function(x) Not ChannelLookup.IsForeign(localMoviesDb, x.Candidate.Channel)) _
+        .Where(Function(x) ChannelLookup.IsMovieChannel(localMoviesDb, x.Candidate.Channel)) _
+        .Where(Function(x) x.Candidate.StartTime > DateTime.Now) _
+        .GroupBy(Function(x) NormalizeTitle(x.Candidate.Title)) _
+        .Select(Function(g) g _
+            .OrderByDescending(Function(m) TitleHelpers.GetChannelPriority(m.Candidate.Channel)) _
+            .ThenByDescending(Function(m) m.Candidate.Channel.ToLower().Contains("hd")) _
+            .ThenBy(Function(m) m.Candidate.StartTime) _
+            .First()) _
+        .OrderBy(Function(x) x.Candidate.StartTime) _
+        .Take(100)
+
             Dim recordingLog As New List(Of String)
             Dim started As New HashSet(Of String)
 
@@ -183,7 +186,7 @@ Module Program
                 Next
 
                 Console.SetCursorPosition(0, dashboardTop)
-                ' Clear dashboard area
+
                 For i = 1 To dashboardHeight
                     WriteLineClean("")
                 Next
@@ -198,19 +201,31 @@ Module Program
                 WriteLineClean("Start   Channel                        Title                              In")
                 WriteLineClean("--------------------------------------------------------------------------")
 
-                For Each s In planned.Take(1)
+                ' DISPLAY ONLY NEXT UPCOMING MOVIE
+                Dim nextMovie = planned.FirstOrDefault()
 
-                    Dim key = s.Candidate.Channel & "|" & s.Candidate.StartTime
-                    Dim diff = (s.Candidate.StartTime - DateTime.Now).TotalSeconds
+                If nextMovie IsNot Nothing Then
 
+                    Dim diff = (nextMovie.Candidate.StartTime - DateTime.Now).TotalSeconds
                     Dim mins = Math.Floor(diff / 60)
                     Dim secs = diff Mod 60
 
-                    Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
+                    Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, nextMovie.Candidate.Channel)
 
-                    WriteLineClean($"{s.Candidate.StartTime:HH:mm}   {ch.Item1,-30} {s.Candidate.Title,-35} {mins,2}:{secs:00}")
+                    WriteLineClean($"{nextMovie.Candidate.StartTime:HH:mm}   {ch.Item1,-30} {nextMovie.Candidate.Title,-35} {mins,2}:{secs:00}")
 
-                    If diff <= 60 AndAlso diff >= -120 AndAlso Not started.Contains(key) Then
+                End If
+
+                ' SCHEDULER LOGIC
+                For Each s In planned
+
+                    Dim key =
+                s.Candidate.Channel & "|" &
+                s.Candidate.StartTime.ToString("yyyyMMddHHmm")
+
+                    Dim diff = (s.Candidate.StartTime - DateTime.Now).TotalSeconds
+
+                    If diff <= 30 AndAlso diff >= -30 Then
 
                         If started.Add(key) Then
 
@@ -218,19 +233,23 @@ Module Program
 
                             If String.IsNullOrWhiteSpace(streamId) Then Continue For
 
+                            Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, s.Candidate.Channel)
+
                             Console.WriteLine("TRIGGERING RECORDER → " & s.Candidate.Title)
 
                             Recorder.RecordMovie(
-        s.Candidate.Title,
-        streamId,
-        s.Candidate.StartTime,
-        s.Candidate.EndTime)
+                        s.Candidate.Title,
+                        streamId,
+                        s.Candidate.StartTime,
+                        s.Candidate.EndTime)
 
-                            Dim msg = $"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
+                            Dim msg =
+                        $"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
 
                             recordingLog.Add(msg)
 
                             Log(msg)
+
                         End If
 
                     End If
@@ -253,26 +272,11 @@ Module Program
 
             End While
 
-            Console.ResetColor()
-
-            sw.Stop()
-
-            Console.WriteLine(vbCrLf & "--------------------------------------------------------------------------------")
-            Console.WriteLine()
-            Console.WriteLine("Scheduler active... waiting for start times")
-
-            While True
-                Thread.Sleep(1000)
-            End While
-            Console.WriteLine("DONE. Time: " & sw.Elapsed.Minutes & "m " & sw.Elapsed.Seconds & "s")
-
-            Console.WriteLine("Press Enter to exit.")
-            Console.ReadLine()
-
         Catch ex As Exception
             Console.WriteLine("FATAL ERROR:")
             Console.WriteLine(ex.ToString())
         End Try
+
     End Sub
 
     ' --- DOWNLOAD LOGIC (USER ARCHIVE VERSION) ---
