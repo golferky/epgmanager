@@ -10,7 +10,7 @@ Public Module Recorder
 
     Private ReadOnly _recordingLimiter As New SemaphoreSlim(3)
 
-    Private LOG_FILE As String = "/Users/garyscudder/epg/logs/recordings.log"
+    Public LOG_FILE As String = "/Users/garyscudder/epg/logs/recordings.log"
 
     Public Sub RecordMovie(title As String,
                            streamId As String,
