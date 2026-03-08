@@ -74,8 +74,13 @@ Module Program
 
             Dim json = GetXtreamJson(_epgUrl, _epgUser, _epgPass, _userAgent).Result
 
+            If json.Contains("""error""") Then
+                Console.WriteLine("XTREAM API ERROR → " & json)
+                Return
+            End If
+
             Dim streams =
-        Newtonsoft.Json.JsonConvert.DeserializeObject(Of List(Of XtreamStream))(json)
+    Newtonsoft.Json.JsonConvert.DeserializeObject(Of List(Of XtreamStream))(json)
 
             UpdateStreamIds(_epgUrl, _epgUser, _epgPass, streams, localMoviesDb)
 
@@ -94,6 +99,7 @@ Module Program
         $"{_epgUrl}{_epgXMLTV}?username={_epgUser}&password={_epgPass}"
 
             Dim localPath = Path.Combine(_guideDir, "guide.xml")
+            GoTo SkipGuide
 
             Console.WriteLine()
             Console.WriteLine("Downloading XML guide...")
@@ -127,7 +133,7 @@ Module Program
                 Console.WriteLine("Guide unchanged → skipping import")
 
             End If
-
+SkipGuide:
             ' ---------------------------------------------------
             ' 3️⃣ SUGGESTIONS ENGINE
             ' ---------------------------------------------------
