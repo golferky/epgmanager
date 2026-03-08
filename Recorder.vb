@@ -83,7 +83,7 @@ Public Module Recorder
                 Directory.CreateDirectory(movieFolder)
             End If
 
-            Dim tmp = Path.Combine(movieFolder, safeTitle & ".tmp.mp4")
+            Dim tmp = Path.Combine(movieFolder, safeTitle & ".tmpmp4")
             Dim output = Path.Combine(movieFolder, safeTitle & ".mp4")
 
             ' Direct stream URL (stable for IPTV)
