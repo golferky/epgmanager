@@ -291,11 +291,12 @@ Module Program
                 Console.ResetColor()
 
                 If shutdownRequested Then
-                    WriteLineClean($"Waiting for {DvrDashboard.activeRecordings.Count} recordings to finish...")
+                    Dim running = Process.GetProcessesByName("ffmpeg").Length
+                    WriteLineClean($"Waiting for {running} recordings to finish...")
                 End If
 
                 ' Exit once shutdown requested and no recordings active
-                If shutdownRequested AndAlso DvrDashboard.activeRecordings.Count = 0 Then
+                If shutdownRequested AndAlso running = 0 Then
                     Exit While
                 End If
 

@@ -18,17 +18,20 @@ Public Module Recorder
                        startTime As DateTime,
                        endTime As DateTime)
 
-        If Not _recordingLimiter.Wait(0) Then
-            Log("SKIPPED → No recording slot → " & title)
-            Return
-        End If
+        _recordingLimiter.Wait()
 
         Task.Run(Sub()
+
                      Try
+
                          RunRecording(title, streamId, startTime, endTime)
+
                      Finally
+
                          _recordingLimiter.Release()
+
                      End Try
+
                  End Sub)
 
     End Sub
