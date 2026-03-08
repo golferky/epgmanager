@@ -290,8 +290,8 @@ Module Program
 
                 Console.ResetColor()
 
+                Dim running = Process.GetProcessesByName("ffmpeg").Length
                 If shutdownRequested Then
-                    Dim running = Process.GetProcessesByName("ffmpeg").Length
                     WriteLineClean($"Waiting for {running} recordings to finish...")
                 End If
 
