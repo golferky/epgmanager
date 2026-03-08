@@ -164,11 +164,11 @@ Module Program
         .GroupBy(Function(x) NormalizeTitle(x.Candidate.Title)) _
         .Select(Function(g) g _
             .OrderByDescending(Function(m) TitleHelpers.GetChannelPriority(m.Candidate.Channel)) _
-            .ThenByDescending(Function(m) m.Candidate.Channel.ToLower().Contains("hd")) _
+            .ThenByDescending(Function(m) IsHdChannel(m.Candidate.Channel)) _
             .ThenBy(Function(m) m.Candidate.StartTime) _
             .First()) _
         .OrderBy(Function(x) x.Candidate.StartTime) _
-        .Take(100)
+        .Take(1)
 
             Dim recordingLog As New List(Of String)
             Dim started As New HashSet(Of String)
@@ -235,10 +235,16 @@ Module Program
                     Dim key =
             s.Candidate.Channel & "|" &
             s.Candidate.StartTime.ToString("yyyyMMddHHmm")
-
                     Dim diff = (s.Candidate.StartTime - DateTime.Now).TotalSeconds
 
-                    If diff <= 120 AndAlso diff >= -120 Then
+                    ' Skip movies already started
+                    If diff < 0 Then
+                        Log("SKIPPED → already started → " & s.Candidate.Title)
+                        Continue For
+                    End If
+
+                    ' Trigger recording shortly before start
+                    If diff <= 600 Then
 
                         If started.Add(key) Then
 
@@ -843,6 +849,17 @@ ON guide(channel, start_utc, normalized_title);
         End Using
 
     End Sub
+    Private Function IsHdChannel(channel As String) As Boolean
+
+        Dim c = channel.ToLower()
+
+        Return c.Contains("hd") _
+        OrElse c.Contains("1080") _
+        OrElse c.Contains("720") _
+        OrElse c.Contains("uhd") _
+        OrElse c.Contains("4k")
+
+    End Function
     Private Sub WriteLineClean(text As String)
 
         If text.Length < Console.WindowWidth Then
