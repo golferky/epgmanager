@@ -9,6 +9,8 @@ Public Module DvrDashboard
         Public Property Channel As String
         Public Property StartTime As DateTime
         Public Property EndTime As DateTime
+        Public Property LastSize As Long
+        Public Property LastCheck As DateTime
     End Class
 
     Public activeRecordings As New List(Of ActiveRecording)
@@ -19,6 +21,7 @@ Public Module DvrDashboard
             activeRecordings.Add(New ActiveRecording With {
                 .Title = title,
                 .Channel = channel,
+                .StartTime = DateTime.Now,
                 .EndTime = endTime
             })
         End SyncLock
@@ -27,7 +30,7 @@ Public Module DvrDashboard
 
 
     Public Sub RenderDashboard()
-
+        Dim bar = ProgressBar(percent, 20)
         WriteLineClean("")
         WriteLineClean("ACTIVE RECORDINGS")
         WriteLineClean("------------------------------------------------------------------------------------------------------")
@@ -35,44 +38,53 @@ Public Module DvrDashboard
         WriteLineClean("------------------------------------------------------------------------------------------------------")
 
         Console.ForegroundColor = ConsoleColor.Green
+        SyncLock activeRecordings
 
-        For Each r In DvrDashboard.activeRecordings
+            For Each r In DvrDashboard.activeRecordings
 
-            Dim remaining = r.EndTime - DateTime.Now
+                Dim remaining = r.EndTime - DateTime.Now
 
-            If remaining.TotalSeconds < 0 Then Continue For
+                If remaining.TotalSeconds < 0 Then Continue For
 
-            Dim mins = Math.Floor(remaining.TotalMinutes)
-            Dim secs = remaining.Seconds
+                Dim mins = Math.Floor(remaining.TotalMinutes)
+                Dim secs = remaining.Seconds
 
-            ' Attempt to get recording file size
-            Dim sizeText As String = "--"
+                Dim total = (r.EndTime - r.StartTime).TotalSeconds
+                Dim done = (DateTime.Now - r.StartTime).TotalSeconds
 
-            Try
+                If done < 0 Then done = 0
+                If done > total Then done = total
 
-                Dim folder = Path.Combine(_plexMoviesPath, r.Title)
-                Dim tmpFile = Path.Combine(folder, r.Title & ".tmpmp4")
+                Dim percent = done / total
+                ' Attempt to get recording file size
+                Dim sizeText As String = "--"
 
-                If File.Exists(tmpFile) Then
+                Try
 
-                    Dim fi As New FileInfo(tmpFile)
+                    Dim folder = Path.Combine(_plexMoviesPath, r.Title)
+                    Dim tmpFile = Path.Combine(folder, r.Title & ".tmpmp4")
 
-                    Dim mb = fi.Length / 1024 / 1024
+                    If File.Exists(tmpFile) Then
 
-                    If mb > 1024 Then
-                        sizeText = $"{(mb / 1024):0.00} GB"
-                    Else
-                        sizeText = $"{mb:0} MB"
+                        Dim fi As New FileInfo(tmpFile)
+
+                        Dim mb = fi.Length / 1024 / 1024
+
+                        If mb > 1024 Then
+                            sizeText = $"{(mb / 1024):0.00} GB"
+                        Else
+                            sizeText = $"{mb:0} MB"
+                        End If
+
                     End If
 
-                End If
+                Catch
+                End Try
 
-            Catch
-            End Try
+                WriteLineClean($"{r.Title,-40} {r.StartTime:HH:mm}  {r.EndTime:HH:mm}   {mins,2}:{secs:00}   {sizeText,8}")
 
-            WriteLineClean($"{r.Title,-40} {r.StartTime:HH:mm}  {r.EndTime:HH:mm}   {mins,2}:{secs:00}   {sizeText,8}")
-
-        Next
+            Next
+        End SyncLock
 
         Console.ResetColor()
 
@@ -83,6 +95,16 @@ Public Module DvrDashboard
         SyncLock activeRecordings
             Return activeRecordings.Count
         End SyncLock
+    End Function
+    Private Function ProgressBar(percent As Double, width As Integer) As String
+
+        Dim filled = CInt(percent * width)
+
+        If filled > width Then filled = width
+        If filled < 0 Then filled = 0
+
+        Return New String("█"c, filled) & New String("░"c, width - filled)
+
     End Function
 
 End Module

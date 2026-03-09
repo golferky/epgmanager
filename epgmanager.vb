@@ -199,8 +199,9 @@ Module Program
                 Console.SetCursorPosition(0, dashboardTop)
 
                 For i = 0 To dashboardHeight - 1
-                    Console.SetCursorPosition(0, dashboardTop + i)
-                    Console.Write(New String(" "c, Console.WindowWidth))
+                    Console.SetCursorPosition(0, dashboardTop)
+                    Console.Write(New String(vbLf, dashboardHeight))
+                    Console.SetCursorPosition(0, dashboardTop)
                 Next
 
                 Console.SetCursorPosition(0, dashboardTop)
@@ -285,19 +286,21 @@ Module Program
                 WriteLineClean("--------------------------------------------------------------------------")
 
                 Console.ForegroundColor = ConsoleColor.Green
+                SyncLock DvrDashboard.activeRecordings
 
-                For Each r In DvrDashboard.activeRecordings
+                    For Each r In DvrDashboard.activeRecordings
 
-                    Dim remaining = r.EndTime - DateTime.Now
+                        Dim remaining = r.EndTime - DateTime.Now
 
-                    If remaining.TotalSeconds < 0 Then Continue For
+                        If remaining.TotalSeconds < 0 Then Continue For
 
-                    Dim mins = Math.Floor(remaining.TotalMinutes)
-                    Dim secs = remaining.Seconds
+                        Dim mins = Math.Floor(remaining.TotalMinutes)
+                        Dim secs = remaining.Seconds
 
-                    WriteLineClean($"{r.Title,-40} {r.StartTime:HH:mm} → {r.EndTime:HH:mm}   left {mins,2}:{secs:00}")
+                        WriteLineClean($"{r.Title,-40} {r.StartTime:HH:mm} → {r.EndTime:HH:mm}   left {mins,2}:{secs:00}")
 
-                Next
+                    Next
+                End SyncLock
 
                 Console.ResetColor()
 
@@ -311,8 +314,23 @@ Module Program
                     Exit While
                 End If
 
-                Thread.Sleep(5000)
+                For i = 1 To 50
 
+                    If Console.KeyAvailable Then
+
+                        Dim key = Console.ReadKey(True)
+
+                        If key.Key = ConsoleKey.Q Then
+                            shutdownRequested = True
+                            Console.WriteLine()
+                            Console.WriteLine("Graceful shutdown requested...")
+                        End If
+
+                    End If
+
+                    Thread.Sleep(100)
+
+                Next
             End While
 
             CleanupTempFiles()
