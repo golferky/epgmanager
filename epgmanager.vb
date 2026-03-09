@@ -99,7 +99,7 @@ Module Program
         $"{_epgUrl}{_epgXMLTV}?username={_epgUser}&password={_epgPass}"
 
             Dim localPath = Path.Combine(_guideDir, "guide.xml")
-            GoTo SkipGuide
+            'GoTo SkipGuide
 
             Console.WriteLine()
             Console.WriteLine("Downloading XML guide...")
