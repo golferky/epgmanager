@@ -51,7 +51,8 @@ Public Module Recorder
             Dim paddedStart = startTime.AddSeconds(-START_PADDING_SECONDS)
 
             While DateTime.Now < paddedStart
-
+                Console.WriteLine("StartTime = " & startTime)
+                Console.WriteLine("Now = " & DateTime.Now)
                 Dim remaining = paddedStart - DateTime.Now
 
                 Console.WriteLine($"Waiting {CInt(remaining.TotalSeconds)} sec → {title}")
