@@ -104,7 +104,9 @@ Public Module Recorder
                 End Try
             End If
 
+            Console.WriteLine("Stream URL → " & streamUrl)
             Console.WriteLine("Starting recording → " & streamUrl)
+
             Dim args =
     $"-nostdin -loglevel info " &
     $"-user_agent ""{_userAgent}"" " &
