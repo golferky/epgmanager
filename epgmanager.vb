@@ -235,7 +235,8 @@ Module Program
                 ' ---------------------------
 
                 For Each s In planned
-
+                    '20260309 debug
+                    If started.count >= 1 Then Exit For
                     If shutdownRequested Then Continue For
 
                     Dim key =
