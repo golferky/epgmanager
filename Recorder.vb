@@ -18,18 +18,14 @@ Public Module Recorder
                        startTime As DateTime,
                        endTime As DateTime)
 
-        _recordingLimiter.Wait()
-
         Task.Run(Sub()
 
+                     _recordingLimiter.Wait()
+
                      Try
-
                          RunRecording(title, streamId, startTime, endTime)
-
                      Finally
-
                          _recordingLimiter.Release()
-
                      End Try
 
                  End Sub)
