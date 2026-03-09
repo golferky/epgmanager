@@ -112,25 +112,24 @@ Public Module Recorder
 
             Console.WriteLine("Starting recording → " & streamUrl)
 
-
             Dim args =
-    $"-nostdin -loglevel info " &
-    $"-user_agent ""{_userAgent}"" " &
-    $"-thread_queue_size 1024 " &
-    $"-reconnect 1 " &
-    $"-reconnect_streamed 1 " &
-    $"-reconnect_delay_max 10 " &
-    $"-reconnect_at_eof 1 " &
-    $"-fflags +discardcorrupt " &
-    $"-err_detect ignore_err " &
-    $"-avoid_negative_ts make_zero " &
-    $"-i ""{streamUrl}"" " &
-    $"-t {duration} " &
-    $"-map 0 " &
-    $"-c copy " &
-    $"-movflags +faststart " &
-    $"""{tmp}"""
-
+$"-nostdin -loglevel info " &
+$"-user_agent ""{_userAgent}"" " &
+$"-thread_queue_size 1024 " &
+$"-reconnect 1 " &
+$"-reconnect_streamed 1 " &
+$"-reconnect_delay_max 10 " &
+$"-reconnect_at_eof 1 " &
+$"-fflags +discardcorrupt " &
+$"-err_detect ignore_err " &
+$"-avoid_negative_ts make_zero " &
+$"-i ""{streamUrl}"" " &
+$"-t {duration} " &
+$"-map 0 " &
+$"-c copy " &
+$"-f mp4 " &
+$"-movflags +faststart " &
+$"""{tmp}"""
 
             Dim p As New Process()
 
