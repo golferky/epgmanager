@@ -99,18 +99,17 @@ Module Program
         $"{_epgUrl}{_epgXMLTV}?username={_epgUser}&password={_epgPass}"
 
             Dim localPath = Path.Combine(_guideDir, "guide.xml")
-            'GoTo SkipGuide
-
-            Console.WriteLine()
-            Console.WriteLine("Downloading XML guide...")
-
-            DownloadGuideProperly(guideUrl, localPath).Wait()
 
             Dim needsImport As Boolean =
-        GuideUpdateDetector.GuideNeedsUpdate(_guideDir, stampFile) _
-        OrElse GuideDbIsEmpty(localGuideDb)
+    GuideUpdateDetector.GuideNeedsUpdate(_guideDir, stampFile) _
+    OrElse GuideDbIsEmpty(localGuideDb)
 
             If needsImport Then
+
+                Console.WriteLine()
+                Console.WriteLine("Downloading XML guide...")
+
+                DownloadGuideProperly(guideUrl, localPath).Wait()
 
                 Console.WriteLine("Rebuilding guide database")
 
@@ -130,10 +129,10 @@ Module Program
 
             Else
 
-                Console.WriteLine("Guide unchanged → skipping import")
+                Console.WriteLine("Guide unchanged → skipping download")
 
             End If
-SkipGuide:
+
             ' ---------------------------------------------------
             ' 3️⃣ SUGGESTIONS ENGINE
             ' ---------------------------------------------------
