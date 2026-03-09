@@ -262,11 +262,16 @@ Module Program
 
                             Console.WriteLine("TRIGGERING RECORDER → " & s.Candidate.Title)
 
+                            DvrDashboard.AddRecording(
+    s.Candidate.Title,
+    ch.Item1,
+    s.Candidate.EndTime)
+
                             Recorder.RecordMovie(
-                    s.Candidate.Title,
-                    streamId,
-                    s.Candidate.StartTime,
-                    s.Candidate.EndTime)
+    s.Candidate.Title,
+    streamId,
+    s.Candidate.StartTime,
+    s.Candidate.EndTime)
 
                             Dim msg =
                     $"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
