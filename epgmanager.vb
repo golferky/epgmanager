@@ -883,7 +883,7 @@ ON guide(channel, start_utc, normalized_title);
         OrElse c.Contains("4k")
 
     End Function
-    Private Sub WriteLineClean(text As String)
+    Public Sub WriteLineClean(text As String)
 
         If text.Length < Console.WindowWidth Then
             text &= New String(" "c, Console.WindowWidth - text.Length)

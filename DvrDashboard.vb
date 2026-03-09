@@ -1,6 +1,7 @@
 ﻿Imports System
 Imports System.Collections.Generic
 Imports System.Linq
+Imports System.IO
 
 Public Module DvrDashboard
 
@@ -30,7 +31,6 @@ Public Module DvrDashboard
 
 
     Public Sub RenderDashboard()
-        Dim bar = ProgressBar(percent, 20)
         WriteLineClean("")
         WriteLineClean("ACTIVE RECORDINGS")
         WriteLineClean("------------------------------------------------------------------------------------------------------")
@@ -43,7 +43,6 @@ Public Module DvrDashboard
             For Each r In DvrDashboard.activeRecordings
 
                 Dim remaining = r.EndTime - DateTime.Now
-
                 If remaining.TotalSeconds < 0 Then Continue For
 
                 Dim mins = Math.Floor(remaining.TotalMinutes)
@@ -58,6 +57,7 @@ Public Module DvrDashboard
                 Dim percent = done / total
                 ' Attempt to get recording file size
                 Dim sizeText As String = "--"
+                Dim bar = ProgressBar(percent, 20)
 
                 Try
 
@@ -81,8 +81,8 @@ Public Module DvrDashboard
                 Catch
                 End Try
 
-                WriteLineClean($"{r.Title,-40} {r.StartTime:HH:mm}  {r.EndTime:HH:mm}   {mins,2}:{secs:00}   {sizeText,8}")
-
+                'WriteLineClean($"{r.Title,-40} {r.StartTime:HH:mm}  {r.EndTime:HH:mm}   {mins,2}:{secs:00}   {sizeText,8}")
+                WriteLineClean($"{r.Title,-30} {bar} {(percent * 100),5:0}%   {sizeText,8}")
             Next
         End SyncLock
 
