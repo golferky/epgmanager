@@ -28,32 +28,51 @@ Public Module DvrDashboard
 
     Public Sub RenderDashboard()
 
-        Console.WriteLine("")
-        Console.WriteLine("ACTIVE RECORDINGS")
-        Console.WriteLine("-------------------------------------------------------------")
+        WriteLineClean("")
+        WriteLineClean("ACTIVE RECORDINGS")
+        WriteLineClean("------------------------------------------------------------------------------------------------------")
+        WriteLineClean("Title                                   Start   End     Left     Size")
+        WriteLineClean("------------------------------------------------------------------------------------------------------")
 
         Console.ForegroundColor = ConsoleColor.Green
 
-        SyncLock activeRecordings
+        For Each r In DvrDashboard.activeRecordings
 
-            For Each r In activeRecordings.ToList()
+            Dim remaining = r.EndTime - DateTime.Now
 
-                Dim remaining = r.EndTime - DateTime.Now
+            If remaining.TotalSeconds < 0 Then Continue For
 
-                If remaining.TotalSeconds <= 0 Then
-                    activeRecordings.Remove(r)
-                    Continue For
+            Dim mins = Math.Floor(remaining.TotalMinutes)
+            Dim secs = remaining.Seconds
+
+            ' Attempt to get recording file size
+            Dim sizeText As String = "--"
+
+            Try
+
+                Dim folder = Path.Combine(_plexMoviesPath, r.Title)
+                Dim tmpFile = Path.Combine(folder, r.Title & ".tmpmp4")
+
+                If File.Exists(tmpFile) Then
+
+                    Dim fi As New FileInfo(tmpFile)
+
+                    Dim mb = fi.Length / 1024 / 1024
+
+                    If mb > 1024 Then
+                        sizeText = $"{(mb / 1024):0.00} GB"
+                    Else
+                        sizeText = $"{mb:0} MB"
+                    End If
+
                 End If
 
-                Dim mins = CInt(Math.Floor(remaining.TotalMinutes))
-                Dim secs = remaining.Seconds
+            Catch
+            End Try
 
-                Console.WriteLine(
-                    $"{r.Channel,-25} {r.Title,-35} {mins}:{secs:00} left")
+            WriteLineClean($"{r.Title,-40} {r.StartTime:HH:mm}  {r.EndTime:HH:mm}   {mins,2}:{secs:00}   {sizeText,8}")
 
-            Next
-
-        End SyncLock
+        Next
 
         Console.ResetColor()
 
