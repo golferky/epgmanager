@@ -33,7 +33,6 @@ Public Module Recorder
     End Sub
 
     Private _activeTitles As New HashSet(Of String)
-
     Private Sub RunRecording(title As String,
                              streamId As String,
                              startTime As DateTime,
@@ -113,23 +112,23 @@ Public Module Recorder
             Console.WriteLine("Starting recording → " & streamUrl)
 
             Dim args =
-$"-nostdin -loglevel info " &
-$"-user_agent ""{_userAgent}"" " &
-$"-thread_queue_size 1024 " &
-$"-reconnect 1 " &
-$"-reconnect_streamed 1 " &
-$"-reconnect_delay_max 10 " &
-$"-reconnect_at_eof 1 " &
-$"-fflags +discardcorrupt " &
-$"-err_detect ignore_err " &
-$"-avoid_negative_ts make_zero " &
-$"-i ""{streamUrl}"" " &
-$"-t {duration} " &
-$"-map 0 " &
-$"-c copy " &
-$"-f mp4 " &
-$"-movflags +faststart " &
-$"""{tmp}"""
+    $"-nostdin -loglevel error " &
+    $"-user_agent ""{_userAgent}"" " &
+    $"-thread_queue_size 1024 " &
+    $"-reconnect 1 " &
+    $"-reconnect_streamed 1 " &
+    $"-reconnect_delay_max 10 " &
+    $"-reconnect_at_eof 1 " &
+    $"-fflags +discardcorrupt " &
+    $"-err_detect ignore_err " &
+    $"-avoid_negative_ts make_zero " &
+    $"-i ""{streamUrl}"" " &
+    $"-t {duration} " &
+    $"-map 0 " &
+    $"-c copy " &
+    $"-f mp4 " &
+    $"-movflags +faststart " &
+    $"""{tmp}"""
 
             Dim p As New Process()
 
@@ -143,11 +142,10 @@ $"""{tmp}"""
             p.StartInfo.RedirectStandardOutput = True
 
 
-            ' Capture FFmpeg logs
+            ' Capture FFmpeg logs (log file only)
             AddHandler p.ErrorDataReceived,
             Sub(sender, e)
                 If e.Data IsNot Nothing Then
-                    Console.WriteLine("FFMPEG → " & e.Data)
                     Log("FFMPEG → " & e.Data)
                 End If
             End Sub
@@ -156,7 +154,6 @@ $"""{tmp}"""
             AddHandler p.OutputDataReceived,
             Sub(sender, e)
                 If e.Data IsNot Nothing Then
-                    Console.WriteLine("FFMPEG → " & e.Data)
                     Log("FFMPEG → " & e.Data)
                 End If
             End Sub
@@ -187,15 +184,35 @@ $"""{tmp}"""
 
             ' Rename temp file
             If File.Exists(tmp) Then
-                File.Move(tmp, output, True)
 
-                Console.WriteLine("Completed → " & output)
-                Log("COMPLETED → " & output)
+                Dim fi As New FileInfo(tmp)
+
+                ' Reject tiny or failed recordings
+                If fi.Length < 50 * 1024 * 1024 Then
+
+                    Console.WriteLine("Recording failed → file too small (" & fi.Length & " bytes)")
+                    Log("FAILED RECORDING → too small → " & tmp)
+
+                    Try
+                        File.Delete(tmp)
+                    Catch
+                    End Try
+
+                Else
+
+                    File.Move(tmp, output, True)
+
+                    Console.WriteLine("Completed → " & output)
+                    Log("COMPLETED → " & output)
+
+                End If
+
             Else
+
                 Console.WriteLine("WARNING → Temp file missing: " & tmp)
                 Log("WARNING → Temp file missing: " & tmp)
-            End If
 
+            End If
 
         Catch ex As Exception
 

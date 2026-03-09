@@ -173,7 +173,7 @@ Module Program
             .ThenBy(Function(m) m.Candidate.StartTime) _
             .First()) _
         .OrderBy(Function(x) x.Candidate.StartTime) _
-        .Take(1)
+        .Take(5)
 
             Dim recordingLog As New List(Of String)
             Dim started As New HashSet(Of String)
@@ -282,27 +282,7 @@ Module Program
                 Next
 
                 WriteLineClean("")
-                WriteLineClean("ACTIVE / STARTED RECORDINGS")
-                WriteLineClean("--------------------------------------------------------------------------")
-
-                Console.ForegroundColor = ConsoleColor.Green
-                SyncLock DvrDashboard.activeRecordings
-
-                    For Each r In DvrDashboard.activeRecordings
-
-                        Dim remaining = r.EndTime - DateTime.Now
-
-                        If remaining.TotalSeconds < 0 Then Continue For
-
-                        Dim mins = Math.Floor(remaining.TotalMinutes)
-                        Dim secs = remaining.Seconds
-
-                        WriteLineClean($"{r.Title,-40} {r.StartTime:HH:mm} → {r.EndTime:HH:mm}   left {mins,2}:{secs:00}")
-
-                    Next
-                End SyncLock
-
-                Console.ResetColor()
+                DvrDashboard.RenderDashboard()
 
                 Dim running = Process.GetProcessesByName("ffmpeg").Length
                 If shutdownRequested Then
