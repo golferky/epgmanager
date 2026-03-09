@@ -49,12 +49,16 @@ Public Module Recorder
 
             ' Wait until airtime (with padding)
             Dim paddedStart = startTime.AddSeconds(-START_PADDING_SECONDS)
-            Dim wait = paddedStart - DateTime.Now
 
-            If wait.TotalSeconds > 0 Then
-                Console.WriteLine($"Waiting {CInt(wait.TotalSeconds)} sec → {title}")
-                Thread.Sleep(wait)
-            End If
+            While DateTime.Now < paddedStart
+
+                Dim remaining = paddedStart - DateTime.Now
+
+                Console.WriteLine($"Waiting {CInt(remaining.TotalSeconds)} sec → {title}")
+
+                Thread.Sleep(5000) ' check every 5 seconds
+
+            End While
 
             ' Calculate recording duration
             Dim duration As Integer =
