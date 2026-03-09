@@ -35,9 +35,9 @@ Public Module Recorder
     Private _activeTitles As New HashSet(Of String)
 
     Private Sub RunRecording(title As String,
-                           streamId As String,
-                           startTime As DateTime,
-                           endTime As DateTime)
+                             streamId As String,
+                             startTime As DateTime,
+                             endTime As DateTime)
 
         Console.WriteLine("Recorder slot acquired → " & title)
 
@@ -47,15 +47,17 @@ Public Module Recorder
             Dim paddedStart = startTime.AddSeconds(-START_PADDING_SECONDS)
 
             While DateTime.Now < paddedStart
-                Console.WriteLine("StartTime = " & startTime)
-                Console.WriteLine("Now = " & DateTime.Now)
+
                 Dim remaining = paddedStart - DateTime.Now
 
+                Console.WriteLine("StartTime = " & startTime)
+                Console.WriteLine("Now = " & DateTime.Now)
                 Console.WriteLine($"Waiting {CInt(remaining.TotalSeconds)} sec → {title}")
 
-                Thread.Sleep(5000) ' check every 5 seconds
+                Thread.Sleep(5000)
 
             End While
+
 
             ' Calculate recording duration
             Dim duration As Integer =
@@ -66,6 +68,7 @@ Public Module Recorder
             If duration < 300 Then duration = 300
 
             Console.WriteLine($"Recording duration → {duration} sec")
+
 
             ' Clean title for filesystem
             Dim safeTitle = title.Replace(":", "") _
@@ -78,21 +81,27 @@ Public Module Recorder
                 safeTitle = safeTitle.Replace(c, "")
             Next
 
+
             ' Direct IPTV stream
             Dim streamUrl =
-    $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.ts"
+                $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.ts"
 
-            ' Create folder ONLY when recording begins
+            Console.WriteLine("Stream URL → " & streamUrl)
+
+
+            ' Create folder when recording begins
             Dim movieFolder = Path.Combine(_plexMoviesPath, safeTitle)
 
             If Not Directory.Exists(movieFolder) Then
                 Directory.CreateDirectory(movieFolder)
             End If
 
+
             Dim tmp = Path.Combine(movieFolder, safeTitle & ".tmpmp4")
             Dim output = Path.Combine(movieFolder, safeTitle & ".mp4")
 
-            ' Clean leftover temp file if exists
+
+            ' Clean leftover temp file
             If File.Exists(tmp) Then
                 Try
                     File.Delete(tmp)
@@ -100,8 +109,9 @@ Public Module Recorder
                 End Try
             End If
 
-            Console.WriteLine("Stream URL → " & streamUrl)
+
             Console.WriteLine("Starting recording → " & streamUrl)
+
 
             Dim args =
     $"-nostdin -loglevel info " &
@@ -121,6 +131,7 @@ Public Module Recorder
     $"-movflags +faststart " &
     $"""{tmp}"""
 
+
             Dim p As New Process()
 
             p.EnableRaisingEvents = True
@@ -132,46 +143,60 @@ Public Module Recorder
             p.StartInfo.RedirectStandardError = True
             p.StartInfo.RedirectStandardOutput = True
 
-            ' Capture ffmpeg logs
+
+            ' Capture FFmpeg logs
             AddHandler p.ErrorDataReceived,
             Sub(sender, e)
                 If e.Data IsNot Nothing Then
+                    Console.WriteLine("FFMPEG → " & e.Data)
                     Log("FFMPEG → " & e.Data)
                 End If
             End Sub
 
+
             AddHandler p.OutputDataReceived,
             Sub(sender, e)
                 If e.Data IsNot Nothing Then
+                    Console.WriteLine("FFMPEG → " & e.Data)
                     Log("FFMPEG → " & e.Data)
                 End If
             End Sub
+
 
             AddHandler p.Exited,
             Sub()
                 Log("FFMPEG EXIT → " & title)
             End Sub
 
+
             Log("FFMPEG CMD → " & _ffmpegPath & " " & args)
 
             p.Start()
 
+            Console.WriteLine("FFMPEG STARTED → PID " & p.Id)
+            Log("FFMPEG STARTED → PID " & p.Id & " | " & title)
+
             p.BeginErrorReadLine()
             p.BeginOutputReadLine()
 
-            Log("FFMPEG STARTED → PID " & p.Id & " | " & title)
-
             Console.WriteLine("Recording → " & safeTitle)
+
 
             ' Wait for recording to finish
             p.WaitForExit()
 
-            ' Rename temp file to final output
+
+            ' Rename temp file
             If File.Exists(tmp) Then
                 File.Move(tmp, output, True)
+
                 Console.WriteLine("Completed → " & output)
                 Log("COMPLETED → " & output)
+            Else
+                Console.WriteLine("WARNING → Temp file missing: " & tmp)
+                Log("WARNING → Temp file missing: " & tmp)
             End If
+
 
         Catch ex As Exception
 
@@ -181,4 +206,5 @@ Public Module Recorder
         End Try
 
     End Sub
+
 End Module
