@@ -34,7 +34,7 @@ Public Module DvrDashboard
         WriteLineClean("")
         WriteLineClean("ACTIVE RECORDINGS")
         WriteLineClean("------------------------------------------------------------------------------------------------------")
-        WriteLineClean("Title                                   Start   End     Left     Size")
+        WriteLineClean("Title                          Progress                     Size")
         WriteLineClean("------------------------------------------------------------------------------------------------------")
 
         Console.ForegroundColor = ConsoleColor.Green
@@ -103,7 +103,7 @@ Public Module DvrDashboard
         If filled > width Then filled = width
         If filled < 0 Then filled = 0
 
-        Return New String("█"c, filled) & New String("░"c, width - filled)
+        Return New String("#"c, filled) & New String("-"c, width - filled)
 
     End Function
 
