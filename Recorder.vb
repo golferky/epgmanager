@@ -82,13 +82,6 @@ Public Module Recorder
                 safeTitle = safeTitle.Replace(c, "")
             Next
 
-            ' Create folder ONLY when recording actually begins
-            Dim movieFolder = Path.Combine(_plexMoviesPath, safeTitle)
-
-            If Not Directory.Exists(movieFolder) Then
-                Directory.CreateDirectory(movieFolder)
-            End If
-
             Dim tmp = Path.Combine(movieFolder, safeTitle & ".tmpmp4")
             Dim output = Path.Combine(movieFolder, safeTitle & ".mp4")
 
@@ -105,6 +98,12 @@ Public Module Recorder
                 $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.ts"
 
             Console.WriteLine("Starting recording → " & streamUrl)
+            ' Create folder ONLY when recording actually begins
+            Dim movieFolder = Path.Combine(_plexMoviesPath, safeTitle)
+
+            If Not Directory.Exists(movieFolder) Then
+                Directory.CreateDirectory(movieFolder)
+            End If
 
             Dim args =
     $"-nostdin -loglevel info " &
