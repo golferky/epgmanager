@@ -36,12 +36,12 @@ VALUES (@t,@n,@c,@s,@e,@x)"
 
                 Using cmd As New SQLiteCommand(sql, con, trans)
 
-                    cmd.Parameters.AddWithValue("@t", "")
-                    cmd.Parameters.AddWithValue("@n", "")
-                    cmd.Parameters.AddWithValue("@c", "")
-                    cmd.Parameters.AddWithValue("@s", "")
-                    cmd.Parameters.AddWithValue("@e", "")
-                    cmd.Parameters.AddWithValue("@x", "")
+                    cmd.Parameters.Add("@t", SqliteType.Text)
+                    cmd.Parameters.Add("@n", SqliteType.Text)
+                    cmd.Parameters.Add("@c", SqliteType.Text)
+                    cmd.Parameters.Add("@s", SqliteType.Text)
+                    cmd.Parameters.Add("@e", SqliteType.Text)
+                    cmd.Parameters.Add("@x", SqliteType.Text)
 
                     Dim settings As New XmlReaderSettings()
                     settings.DtdProcessing = DtdProcessing.Parse
@@ -57,18 +57,22 @@ VALUES (@t,@n,@c,@s,@e,@x)"
 
                                 If channel Is Nothing OrElse startAttr Is Nothing OrElse stopAttr Is Nothing Then Continue While
 
-                                Dim startUtc = startAttr.Substring(0, 14)
-                                Dim endUtc = stopAttr.Substring(0, 14)
+                                Dim startUtc = ParseXmltvTime(startAttr.Substring(0, 14))
+                                Dim endUtc = ParseXmltvTime(stopAttr.Substring(0, 14))
 
                                 Dim title As String = ""
 
-                                Dim subTree = reader.ReadSubtree()
+                                While reader.Read()
 
-                                While subTree.Read()
-                                    If subTree.NodeType = XmlNodeType.Element AndAlso subTree.Name = "title" Then
-                                        title = subTree.ReadElementContentAsString()
+                                    If reader.NodeType = XmlNodeType.Element AndAlso reader.Name = "title" Then
+                                        title = reader.ReadElementContentAsString()
                                         Exit While
                                     End If
+
+                                    If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Name = "programme" Then
+                                        Exit While
+                                    End If
+
                                 End While
 
                                 If String.IsNullOrWhiteSpace(title) Then Continue While
@@ -111,5 +115,38 @@ VALUES (@t,@n,@c,@s,@e,@x)"
         End Using
 
     End Sub
+    Private Function ParseXmltvTime(xmlTime As String) As String
 
+        ' XMLTV examples:
+        ' 20260310184000
+        ' 20260310184000 +0000
+        ' 20260310184000 -0400
+
+        Dim dt As DateTime
+
+        If xmlTime.Length > 14 Then
+
+            ' Has timezone offset
+            Dim dto = DateTimeOffset.ParseExact(
+            xmlTime,
+            "yyyyMMddHHmmss zzz",
+            CultureInfo.InvariantCulture)
+
+            ' Convert to LOCAL time
+            dt = dto.LocalDateTime
+
+        Else
+
+            ' No timezone → assume LOCAL already
+            dt = DateTime.ParseExact(
+            xmlTime,
+            "yyyyMMddHHmmss",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeLocal)
+
+        End If
+
+        Return dt.ToString("yyyyMMddHHmmss")
+
+    End Function
 End Module

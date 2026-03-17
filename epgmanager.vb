@@ -13,19 +13,19 @@ Imports System.Net.Http
 Imports System.Runtime.InteropServices
 Imports System.Threading
 Imports Newtonsoft.Json.Linq
+Imports System.Linq
 
-Module Program
+Public Module epgmanager
     ' --- CONFIG CONSTANTS ---
-    Private Const MY_CONFIG As String = "/Users/garyscudder/epg/config.json"
+    Public Const MY_CONFIG As String = "C:\EPG\config.json"
     ' --- GLOBAL VARIABLES ---
-    Private _nasIp As String = ""
+    Public _nasIp As String = ""
+    Private _nasWarehouseDir As String = ""
     Private _firestickIp As String = ""
     Private _adbExePath As String = ""
-    Private _DbPath As String = ""
+    Public _DbPath As String = ""
     Private _HistPath As String = ""
-    Private _nasWarehouseDir As String = ""
-    Private _guideDir As String = ""
-    Private _guidedb As String = ""
+    Public _guideDir As String = ""
     Public _epgUrl As String = ""
     Public _epgXMLTV As String = ""
     Public _epgUser As String = ""
@@ -33,7 +33,9 @@ Module Program
     Public _plexMoviesPath As String = ""
     Public _ffmpegPath As String = ""
     Public _userAgent As String = ""
-    Private _stickLanding As String = ""
+    Public _rootPath As String = ""
+    Public _OMDBAPIkey As String = ""
+    Public _recordingDir As String = ""
 
     Private _preferredChannels As New HashSet(Of String)
     Private ReadOnly _localDir As String = "C:\Movies\"
@@ -41,6 +43,7 @@ Module Program
     Private _localHist As String = ""
 
     Private shutdownRequested As Boolean = False
+    Public vlcProcess As Process = Nothing
 
     Sub Main(args As String())
 
@@ -53,6 +56,7 @@ Module Program
 
         Try
             If Not LoadConfig() Then
+
                 Console.WriteLine("Could not load config.json at " & MY_CONFIG)
                 Console.ReadLine()
                 Return
@@ -80,7 +84,7 @@ Module Program
             End If
 
             Dim streams =
-    Newtonsoft.Json.JsonConvert.DeserializeObject(Of List(Of XtreamStream))(json)
+        Newtonsoft.Json.JsonConvert.DeserializeObject(Of List(Of XtreamStream))(json)
 
             UpdateStreamIds(_epgUrl, _epgUser, _epgPass, streams, localMoviesDb)
 
@@ -90,49 +94,7 @@ Module Program
             ' ---------------------------------------------------
             ' 2️⃣ GUIDE BUILD
             ' ---------------------------------------------------
-
-            Dim localGuideDb = _guidedb
-
-            Dim stampFile = Path.Combine(_guideDir, "last_import.txt")
-
-            Dim guideUrl =
-        $"{_epgUrl}{_epgXMLTV}?username={_epgUser}&password={_epgPass}"
-
-            Dim localPath = Path.Combine(_guideDir, "guide.xml")
-
-            Dim needsImport As Boolean =
-    GuideUpdateDetector.GuideNeedsUpdate(_guideDir, stampFile) _
-    OrElse GuideDbIsEmpty(localGuideDb)
-
-            If needsImport Then
-
-                Console.WriteLine()
-                Console.WriteLine("Downloading XML guide...")
-
-                DownloadGuideProperly(guideUrl, localPath).Wait()
-
-                Console.WriteLine("Rebuilding guide database")
-
-                RebuildGuideDatabase(localGuideDb)
-
-                Console.WriteLine("Importing XML guide")
-
-                For Each xmlFile In Directory.GetFiles(_guideDir, "*.xml")
-                    GuideImporter.ImportXml(xmlFile, localGuideDb)
-                Next
-
-                Console.WriteLine("Creating guide indexes")
-
-                CreateGuideIndexes(localGuideDb)
-
-                GuideUpdateDetector.SaveUpdateStamp(_guideDir, stampFile)
-
-            Else
-
-                Console.WriteLine("Guide unchanged → skipping download")
-
-            End If
-
+            GuideUpdater.UpdateGuide()
             ' ---------------------------------------------------
             ' 3️⃣ SUGGESTIONS ENGINE
             ' ---------------------------------------------------
@@ -142,11 +104,11 @@ Module Program
             Dim stats As New EngineStats
 
             Dim candidates =
-        GuideQueryEngine.GetUpcomingCandidates(
-            localGuideDb,
-            localHistoryDb,
-            localMoviesDb,
-            stats)
+            GuideQueryEngine.GetUpcomingCandidates(
+                _DbPath,
+                localHistoryDb,
+                localMoviesDb,
+                stats)
 
             Console.WriteLine("Candidates found: " & candidates.Count)
 
@@ -161,19 +123,65 @@ Module Program
             Dim myChannels = LoadMyChannels(localMoviesDb)
             Console.WriteLine("Movie channels loaded: " & myChannels.Count)
 
-            Dim planned = scored _
-        .Where(Function(x) myChannels.Contains(x.Candidate.Channel)) _
-        .Where(Function(x) Not ChannelLookup.IsForeign(localMoviesDb, x.Candidate.Channel)) _
-        .Where(Function(x) ChannelLookup.IsMovieChannel(localMoviesDb, x.Candidate.Channel)) _
-        .Where(Function(x) x.Candidate.StartTime > DateTime.Now) _
+            Dim step1 = scored _
+        .Where(Function(x) myChannels.Contains(x.Candidate.Channel)).ToList()
+
+            Dim step2 = step1 _
+        .Where(Function(x) Not ChannelLookup.IsForeign(localMoviesDb, x.Candidate.Channel)).ToList()
+
+            Dim step3 = step2 _
+        .Where(Function(x) ChannelLookup.IsMovieChannel(localMoviesDb, x.Candidate.Channel)).ToList()
+
+            Dim step4 = step3 _
+        .Where(Function(x) x.Candidate.StartTime > DateTime.Now).ToList()
+
+            Dim step5 = step4 _
         .GroupBy(Function(x) NormalizeTitle(x.Candidate.Title)) _
         .Select(Function(g) g _
             .OrderByDescending(Function(m) TitleHelpers.GetChannelPriority(m.Candidate.Channel)) _
             .ThenByDescending(Function(m) IsHdChannel(m.Candidate.Channel)) _
             .ThenBy(Function(m) m.Candidate.StartTime) _
-            .First()) _
+            .First()).ToList()
+
+            Dim owned As New List(Of GuideCandidate)
+
+            For Each m In step5
+                If MovieExistsInLibrary(m.Candidate.Title) Then
+                    owned.Add(m.Candidate)
+                End If
+            Next
+
+            Console.WriteLine()
+            Console.WriteLine("===== OWNED MOVIES AIRING =====")
+            Console.WriteLine()
+
+            For Each m In owned.Take(20)
+                Console.WriteLine($"{m.StartTime:HH:mm}  {m.Channel,-25}  {m.Title}")
+            Next
+
+            Dim planned = step5 _
+        .Where(Function(x) Not MovieExistsInLibrary(x.Candidate.Title)) _
         .OrderBy(Function(x) x.Candidate.StartTime) _
-        .Take(5)
+        .Take(100)
+
+            Console.WriteLine()
+            Console.WriteLine("FILTER PIPELINE")
+            Console.WriteLine("--------------------------------")
+            Console.WriteLine("Scored candidates:      " & scored.Count)
+            Console.WriteLine("My channels:            " & step1.Count)
+            Console.WriteLine("After foreign filter:   " & step2.Count)
+            Console.WriteLine("Movie channels only:    " & step3.Count)
+            Console.WriteLine("Future programs:        " & step4.Count)
+            Console.WriteLine("Unique titles:          " & step5.Count)
+            Console.WriteLine("Final planned:          " & planned.Count)
+            Console.WriteLine()
+
+            Console.WriteLine("FIRST PLANNED RECORDINGS")
+            Console.WriteLine("--------------------------------")
+
+            For Each p In planned.Take(10)
+                Console.WriteLine($"{p.Candidate.StartTime:HH:mm}  {p.Candidate.Channel,-24} {p.Candidate.Title}")
+            Next
 
             Dim recordingLog As New List(Of String)
             Dim started As New HashSet(Of String)
@@ -198,11 +206,11 @@ Module Program
 
                 Console.SetCursorPosition(0, dashboardTop)
 
-                For i = 0 To dashboardHeight - 1
-                    Console.SetCursorPosition(0, dashboardTop)
-                    Console.Write(New String(vbLf, dashboardHeight))
-                    Console.SetCursorPosition(0, dashboardTop)
-                Next
+                'For i = 0 To dashboardHeight - 1
+                '    Console.SetCursorPosition(0, dashboardTop)
+                '    Console.Write(New String(vbLf, dashboardHeight))
+                '    Console.SetCursorPosition(0, dashboardTop)
+                'Next
 
                 Console.SetCursorPosition(0, dashboardTop)
 
@@ -236,17 +244,21 @@ Module Program
 
                 For Each s In planned
                     '20260309 debug
-                    If started.count >= 1 Then Exit For
+                    If Not s.Candidate.Title.ToLower.Contains("planes") Then
+                        Continue For
+                    Else
+                        Console.WriteLine($"DEBUG: Found candidate → " & s.Candidate.Title)
+                    End If
                     If shutdownRequested Then Continue For
 
                     Dim key =
-            s.Candidate.Channel & "|" &
-            s.Candidate.StartTime.ToString("yyyyMMddHHmm")
+                s.Candidate.Channel & "|" &
+                s.Candidate.StartTime.ToString("yyyyMMddHHmm")
                     Dim diff = (s.Candidate.StartTime - DateTime.Now).TotalSeconds
 
                     ' Skip movies already started
                     If diff < 0 Then
-                        Log("SKIPPED → already started → " & s.Candidate.Title)
+                        'Log("SKIPPED → already started → " & s.Candidate.Title)
                         Continue For
                     End If
 
@@ -264,18 +276,18 @@ Module Program
                             Console.WriteLine("TRIGGERING RECORDER → " & s.Candidate.Title)
 
                             DvrDashboard.AddRecording(
-    s.Candidate.Title,
-    ch.Item1,
-    s.Candidate.EndTime)
+        s.Candidate.Title,
+        ch.Item1,
+        s.Candidate.EndTime)
 
                             Recorder.RecordMovie(
-    s.Candidate.Title,
-    streamId,
-    s.Candidate.StartTime,
-    s.Candidate.EndTime)
+        s.Candidate.Title,
+        streamId,
+        s.Candidate.StartTime,
+        s.Candidate.EndTime)
 
                             Dim msg =
-                    $"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
+                        $"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
 
                             recordingLog.Add(msg)
 
@@ -367,20 +379,20 @@ Module Program
 
         Dim handler As New HttpClientHandler()
         handler.AutomaticDecompression =
-        Net.DecompressionMethods.GZip Or Net.DecompressionMethods.Deflate
+            Net.DecompressionMethods.GZip Or Net.DecompressionMethods.Deflate
 
         Using client As New HttpClient(handler)
 
             client.DefaultRequestHeaders.Clear()
 
             client.DefaultRequestHeaders.Add("User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
             client.DefaultRequestHeaders.Add("Accept",
-            "text/xml,application/xml;q=0.9,*/*;q=0.8")
+                "text/xml,application/xml;q=0.9,*/*;q=0.8")
 
             client.DefaultRequestHeaders.Add("Accept-Language",
-            "en-US,en;q=0.9")
+                "en-US,en;q=0.9")
 
             client.DefaultRequestHeaders.Add("Connection", "keep-alive")
 
@@ -470,11 +482,11 @@ Module Program
                             Dim chNum = If(liveMap.ContainsKey(cleanId), liveMap(cleanId), "---")
 
                             upcoming.Add(New Dictionary(Of String, Object) From {
-                                {"sort", startRaw}, {"start", startDt.ToString("MM/dd hh:mm tt")},
-                                {"num", chNum}, {"chan", chanId.ToUpper()},
-                                {"title", node.SelectSingleNode("title")?.InnerText.Trim()}, {"dur", duration},
-                                {"end", stopDt.ToString("hh:mm tt")}
-                            })
+                                    {"sort", startRaw}, {"start", startDt.ToString("MM/dd hh:mm tt")},
+                                    {"num", chNum}, {"chan", chanId.ToUpper()},
+                                    {"title", node.SelectSingleNode("title")?.InnerText.Trim()}, {"dur", duration},
+                                    {"end", stopDt.ToString("hh:mm tt")}
+                                })
                         End If
                     End If
                 Next
@@ -498,7 +510,7 @@ Module Program
                         Dim cleanChan = m("chan").ToString().Replace("US|", "").Replace("UK|", "")
                         If cleanChan.Length > 17 Then cleanChan = cleanChan.Substring(0, 17)
                         Console.WriteLine(String.Format("{0,-18} | {1,-10} | {2,3}m  | {3,-5} | {4,-18} | {5}{6}{7}",
-                            m("start"), m("end"), m("dur"), m("num"), cleanChan, If(CInt(m("dur")) >= 140, "🚩 ", "   "), m("title"), If(isOwned, " [OWNED]", "")))
+                                m("start"), m("end"), m("dur"), m("num"), cleanChan, If(CInt(m("dur")) >= 140, "🚩 ", "   "), m("title"), If(isOwned, " [OWNED]", "")))
                         Console.ResetColor()
                         seen.Add(key)
                     End Using
@@ -607,31 +619,53 @@ Module Program
 
             If Not File.Exists(MY_CONFIG) Then
                 Console.WriteLine("Config not found: " & MY_CONFIG)
+                MsgBox("Config not found: " & MY_CONFIG)
                 Return False
             End If
+            Try
+                Dim root =
+                    JsonDocument.Parse(File.ReadAllText(MY_CONFIG)).RootElement
+                Dim prop As JsonElement
+                If root.TryGetProperty("RECORDINGS_DIR", prop) Then
+                    _recordingDir = prop.GetString()
+                Else
+                    Throw New Exception("Missing JSON key → RECORDINGS_DIR")
+                End If
 
-            Dim root =
-            JsonDocument.Parse(File.ReadAllText(MY_CONFIG)).RootElement
+                _firestickIp = root.GetProperty("FIRESTICK_IP").GetString()
+                _OMDBAPIkey = root.GetProperty("OMDB_KEY").GetString()
+                _DbPath = root.GetProperty("DB_PATH").GetString()
+                _guideDir = root.GetProperty("GUIDE_DATA_DIR").GetString()
+                _nasWarehouseDir = root.GetProperty("WAREHOUSE").GetString()
+                _nasIp = root.GetProperty("MY_NAS_IP").GetString()
+                _rootPath = root.GetProperty("WINDOWS_ROOT").GetString()
 
-            _nasIp = root.GetProperty("MY_NAS_IP").GetString()
-            _firestickIp = root.GetProperty("FIRESTICK_IP").GetString()
-            _adbExePath = If(RuntimeInformation.IsOSPlatform(OSPlatform.Windows), root.GetProperty("ADB_WIN_PATH").GetString(), root.GetProperty("ADB_MAC_PATH").GetString())
-            _stickLanding = root.GetProperty("STICK_LANDING").GetString()
-            _DbPath = root.GetProperty("DB_PATH").GetString()
-            _HistPath = root.GetProperty("DB_HIST_PATH").GetString()
-            _guideDir = root.GetProperty("GUIDE_DATA_DIR").GetString()
-            _guidedb = root.GetProperty("GUIDE_MASTER_DB").GetString()
-            Console.WriteLine("Guide DB path: " & _guidedb)
-            _nasWarehouseDir = root.GetProperty("WAREHOUSE").GetString()
-            If root.TryGetProperty("EPG_BASE_URL", Nothing) Then _epgUrl = root.GetProperty("EPG_BASE_URL").GetString()
-            If root.TryGetProperty("EPG_XMLTV", Nothing) Then _epgXMLTV = root.GetProperty("EPG_XMLTV").GetString()
-            If root.TryGetProperty("EPG_USER", Nothing) Then _epgUser = root.GetProperty("EPG_USER").GetString()
-            If root.TryGetProperty("EPG_PASS", Nothing) Then _epgPass = root.GetProperty("EPG_PASS").GetString()
-            If root.TryGetProperty("USER_AGENT", Nothing) Then _userAgent = root.GetProperty("USER_AGENT").GetString()
-            If root.TryGetProperty("PLEX_MOVIES_PATH", Nothing) Then _plexMoviesPath = root.GetProperty("PLEX_MOVIES_PATH").GetString()
-            If root.TryGetProperty("FFMPEG_PATH", Nothing) Then _ffmpegPath = root.GetProperty("FFMPEG_PATH").GetString()
+                If root.TryGetProperty("EPG_BASE_URL", Nothing) Then _epgUrl = root.GetProperty("EPG_BASE_URL").GetString()
+                If root.TryGetProperty("EPG_XMLTV", Nothing) Then _epgXMLTV = root.GetProperty("EPG_XMLTV").GetString()
+                If root.TryGetProperty("EPG_USER", Nothing) Then _epgUser = root.GetProperty("EPG_USER").GetString()
+                If root.TryGetProperty("EPG_PASS", Nothing) Then _epgPass = root.GetProperty("EPG_PASS").GetString()
+                If root.TryGetProperty("USER_AGENT", Nothing) Then _userAgent = root.GetProperty("USER_AGENT").GetString()
+                _plexMoviesPath = root.GetProperty("MY_NAS_IP").GetString() & "" & root.GetProperty("PLEX_MOVIES_ROOT").GetString()
 
-            Return True
+                Dim rootDir As String
+
+                If RuntimeInformation.IsOSPlatform(OSPlatform.Windows) Then
+                    rootDir = root.GetProperty("WINDOWS_ROOT").GetString()
+                    _adbExePath = root.GetProperty("ADB_WIN_PATH").GetString()
+                    _ffmpegPath = root.GetProperty("FFMPEG_WINDOWS").GetString()
+                Else
+                    rootDir = root.GetProperty("MAC_ROOT").GetString()
+                    _adbExePath = root.GetProperty("ADB_MAC_PATH").GetString()
+                    _ffmpegPath = root.GetProperty("FFMPEG_MAC").GetString()
+                End If
+
+                Return True
+
+            Catch ex As Exception
+                MsgBox("Error parsing config.json: " & ex.Message)
+                Return False
+            End Try
+
         Catch : Return False : End Try
     End Function
 
@@ -652,15 +686,12 @@ Module Program
     End Sub
     Sub RebuildGuideDatabase(dbPath As String)
 
-        If File.Exists(dbPath) Then
-            File.Delete(dbPath)
-        End If
-
         Using con As New SqliteConnection($"Data Source={dbPath}")
             con.Open()
 
             Dim sql =
-    "
+        "
+DROP TABLE IF EXISTS guide;
 CREATE TABLE guide (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT,
@@ -687,7 +718,7 @@ CREATE TABLE guide (
 
             ' Remove duplicates before creating unique index
             Dim cleanupSql =
-"
+    "
 DELETE FROM guide
 WHERE rowid NOT IN (
     SELECT MIN(rowid)
@@ -701,7 +732,7 @@ WHERE rowid NOT IN (
             End Using
 
             Dim sql =
-"
+    "
 DROP INDEX IF EXISTS idx_guide_start;
 
 CREATE INDEX IF NOT EXISTS idx_guide_start_cover
@@ -731,7 +762,7 @@ ON guide(channel, start_utc, normalized_title);
         Public Property epg_channel_id As String
     End Class
 
-    Private Function GuideDbIsEmpty(dbPath As String) As Boolean
+    Public Function GuideDbIsEmpty(dbPath As String) As Boolean
 
         Try
             Using con As New SqliteConnection($"Data Source={dbPath}")
@@ -739,7 +770,7 @@ ON guide(channel, start_utc, normalized_title);
 
                 ' does table exist?
                 Dim tableCmd As New SqliteCommand(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='guide'", con)
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='guide'", con)
 
                 If tableCmd.ExecuteScalar() Is Nothing Then
                     Return True ' table missing = empty
@@ -747,7 +778,7 @@ ON guide(channel, start_utc, normalized_title);
 
                 ' count rows
                 Dim countCmd As New SqliteCommand(
-                "SELECT COUNT(*) FROM guide", con)
+                    "SELECT COUNT(*) FROM guide", con)
 
                 Dim count = Convert.ToInt32(countCmd.ExecuteScalar())
 
@@ -764,12 +795,12 @@ ON guide(channel, start_utc, normalized_title);
 
         Dim channels As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
-        Using conn As New SQLiteConnection("Data Source=" & db)
+        Using conn As New SqliteConnection("Data Source=" & db)
             conn.Open()
 
-            Dim cmd As New SQLiteCommand(
-            "SELECT channel_id FROM channels WHERE is_movie_channel = 1 AND is_foreign = 0",
-            conn)
+            Dim cmd As New SqliteCommand(
+                "SELECT channel_id FROM channels WHERE is_movie_channel = 1 AND is_foreign = 0",
+                conn)
 
             Using rdr = cmd.ExecuteReader()
 
@@ -790,7 +821,7 @@ ON guide(channel, start_utc, normalized_title);
             con.Open()
 
             Dim cmd As New SqliteCommand(
-            "SELECT 1 FROM recording_history WHERE title=@t AND owned=1 LIMIT 1", con)
+                "SELECT 1 FROM recording_history WHERE title=@t AND owned=1 LIMIT 1", con)
 
             cmd.Parameters.AddWithValue("@t", title)
 
@@ -800,17 +831,17 @@ ON guide(channel, start_utc, normalized_title);
     End Function
 
     Public Async Function GetXtreamJson(epgUrl As String,
-                                     user As String,
-                                     pass As String,
-                                     userAgent As String) As Task(Of String)
+                                         user As String,
+                                         pass As String,
+                                         userAgent As String) As Task(Of String)
 
         Dim apiUrl =
-        $"{_epgUrl}player_api.php?username={_epgUser}&password={_epgPass}&action=get_live_streams"
+            $"{_epgUrl}player_api.php?username={_epgUser}&password={_epgPass}&action=get_live_streams"
         'http://primestreams.tv:826/player_api.php?username=jFYSJ6UprmRRO&password=Hq0Nl2sZqRGSR9yo&action=get_live_streams
 
         Dim handler As New HttpClientHandler()
         handler.AutomaticDecompression =
-        Net.DecompressionMethods.GZip Or Net.DecompressionMethods.Deflate
+            Net.DecompressionMethods.GZip Or Net.DecompressionMethods.Deflate
 
         Using client As New HttpClient(handler)
 
@@ -827,10 +858,10 @@ ON guide(channel, start_utc, normalized_title);
 
     End Function
     Public Sub UpdateStreamIds(epgUrl As String,
-                            user As String,
-                            pass As String,
-                            streams As List(Of XtreamStream),
-                            moviesDb As String)
+                                user As String,
+                                pass As String,
+                                streams As List(Of XtreamStream),
+                                moviesDb As String)
 
         Using con As New SqliteConnection($"Data Source={moviesDb};Pooling=False;")
             con.Open()
@@ -838,7 +869,7 @@ ON guide(channel, start_utc, normalized_title);
             For Each s In streams
 
                 If String.IsNullOrWhiteSpace(s.stream_id) _
-                OrElse String.IsNullOrWhiteSpace(s.epg_channel_id) Then
+                    OrElse String.IsNullOrWhiteSpace(s.epg_channel_id) Then
                     Continue For
                 End If
 
@@ -863,10 +894,10 @@ ON guide(channel, start_utc, normalized_title);
         Dim c = channel.ToLower()
 
         Return c.Contains("hd") _
-        OrElse c.Contains("1080") _
-        OrElse c.Contains("720") _
-        OrElse c.Contains("uhd") _
-        OrElse c.Contains("4k")
+            OrElse c.Contains("1080") _
+            OrElse c.Contains("720") _
+            OrElse c.Contains("uhd") _
+            OrElse c.Contains("4k")
 
     End Function
     Public Sub WriteLineClean(text As String)
@@ -889,7 +920,7 @@ ON guide(channel, start_utc, normalized_title);
             End If
 
             Dim line =
-            $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | {msg}"
+                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | {msg}"
 
             File.AppendAllText(LOG_FILE, line & Environment.NewLine)
 
@@ -898,8 +929,42 @@ ON guide(channel, start_utc, normalized_title);
         End Try
 
     End Sub
+
+    Public Function MovieExistsInLibrary(title As String) As Boolean
+
+        Dim normalized = NormalizeTitle(title)
+
+        Using con As New SqliteConnection($"Data Source={_DbPath};Pooling=False;")
+            con.Open()
+
+            Dim sql = "
+            SELECT 1
+            FROM master_titles
+            WHERE title = @t
+            LIMIT 1
+        "
+
+            Using cmd As New SqliteCommand(sql, con)
+
+                cmd.Parameters.AddWithValue("@t", normalized)
+
+                Dim result = cmd.ExecuteScalar()
+
+                If result IsNot Nothing Then
+                    Return True
+                End If
+
+            End Using
+
+        End Using
+
+        Return False
+
+    End Function
+
     Public Class ChannelInfo
         Public Property Nickname As String
         Public Property MyChannel As String
     End Class
 End Module
+

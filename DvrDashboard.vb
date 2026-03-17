@@ -12,6 +12,7 @@ Public Module DvrDashboard
         Public Property EndTime As DateTime
         Public Property LastSize As Long
         Public Property LastCheck As DateTime
+        Public Property ProcessId As Integer
     End Class
 
     Public activeRecordings As New List(Of ActiveRecording)
@@ -23,7 +24,8 @@ Public Module DvrDashboard
                 .Title = title,
                 .Channel = channel,
                 .StartTime = DateTime.Now,
-                .EndTime = endTime
+                .EndTime = endTime,
+                .ProcessId = Process.GetCurrentProcess().Id
             })
         End SyncLock
 
@@ -38,6 +40,8 @@ Public Module DvrDashboard
         WriteLineClean("------------------------------------------------------------------------------------------------------")
 
         Console.ForegroundColor = ConsoleColor.Green
+        Console.WriteLine($"Recording to Folder {_plexMoviesPath}")
+
         SyncLock activeRecordings
 
             For Each r In DvrDashboard.activeRecordings

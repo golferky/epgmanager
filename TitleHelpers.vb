@@ -20,10 +20,10 @@ Public Module TitleHelpers
         Return Regex.Replace(title, "\((19|20)\d{2}\)", "").Trim()
 
     End Function
-
     Public Function NormalizeTitle(title As String) As String
 
         Dim t = title
+        t = Regex.Replace(t, "[^\w\s]", "")
 
         ' remove IPTV quality tags
         t = Regex.Replace(t, "\[(HD|SD|FHD|UHD|4K)\]", "", RegexOptions.IgnoreCase)
@@ -36,10 +36,21 @@ Public Module TitleHelpers
         t = Regex.Replace(t, "^(US|UK|CA|AU|NZ)\s+PREMIERE[:\-]\s*", "", RegexOptions.IgnoreCase)
 
         ' remove leading country channel prefixes
-        t = Regex.Replace(t, "^(US|UK|CA|AU|NZ)\s*[\|\:\-]\s*", "", RegexOptions.IgnoreCase)
+        t = Regex.Replace(t, "^(US|UK|CA|AU|NZ)\s*[\|\-]\s*", "", RegexOptions.IgnoreCase)
+
+        ' remove years like (1993)
+        t = Regex.Replace(t, "\(\d{4}\)", "")
+
+        ' remove standalone year
+        t = Regex.Replace(t, "\b\d{4}\b", "")
+
+        ' normalize separators
+        t = t.Replace(".", " ")
+        t = t.Replace("_", " ")
+        t = t.Replace("-", " ")
 
         ' remove trailing dash artifacts
-        t = Regex.Replace(t, "-\s*$", "")
+        t = Regex.Replace(t, "\-\s*$", "")
 
         ' collapse multiple spaces
         t = Regex.Replace(t, "\s+", " ")

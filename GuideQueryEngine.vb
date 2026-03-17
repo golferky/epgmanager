@@ -74,8 +74,8 @@ Public Module GuideQueryEngine
             ' ----------------------------------------
             ' QUERY GUIDE ONCE
             ' ----------------------------------------
-            Dim nowUtc = DateTime.UtcNow.ToString("yyyyMMddHHmmss")
-            Dim tomorrowUtc = DateTime.UtcNow.AddHours(24).ToString("yyyyMMddHHmmss")
+            Dim now = DateTime.Now.ToString("yyyyMMddHHmmss")
+            Dim tomorrow = DateTime.Now.AddHours(24).ToString("yyyyMMddHHmmss")
 
             Dim cmd As New SQLiteCommand($"
 SELECT title, channel, start_utc, end_utc, normalized_title
@@ -85,8 +85,8 @@ WHERE lower(channel) IN ({channelFilter})
 ORDER BY start_utc
 LIMIT 5000", guideCon)
 
-            cmd.Parameters.AddWithValue("@now", nowUtc)
-            cmd.Parameters.AddWithValue("@tomorrow", tomorrowUtc)
+            cmd.Parameters.AddWithValue("@now", now)
+            cmd.Parameters.AddWithValue("@tomorrow", tomorrow)
 
             Using r = cmd.ExecuteReader()
 
@@ -97,7 +97,7 @@ LIMIT 5000", guideCon)
                     Dim title = r("title").ToString()
                     Dim channel = r("channel").ToString()
 
-                    Dim startUtc = DateTime.ParseExact(
+                    Dim start = DateTime.ParseExact(
     r("start_utc").ToString(),
     "yyyyMMddHHmmss",
     Globalization.CultureInfo.InvariantCulture)
@@ -116,7 +116,7 @@ LIMIT 5000", guideCon)
                     End If
 
                     ' -------- SCHEDULED FILTER --------
-                    Dim schedKey = norm & startUtc.ToString("yyyy-MM-dd HH:mm:ss")
+                    Dim schedKey = norm & start.ToString("yyyy-MM-dd HH:mm:ss")
 
                     If scheduledSet.Contains(schedKey) Then
                         stats.ScheduledFiltered += 1
@@ -126,7 +126,7 @@ LIMIT 5000", guideCon)
                     list.Add(New GuideCandidate With {
                         .Title = title,
                         .Channel = channel,
-                        .StartTime = startUtc.ToLocalTime(),
+                        .StartTime = start.ToLocalTime(),
                         .EndTime = endUtc.ToLocalTime(),
                         .HistoryState = "New"
                     })
