@@ -133,8 +133,12 @@ Public Module Recorder
             Dim finalPath = Path.Combine(movieFolder, safeName & ".mp4")
 
             File.Move(tempMp4, finalPath, True)
+            Try
+                Log("COMPLETED → " & finalPath)
 
-            Log("COMPLETED → " & finalPath)
+            Catch ex As Exception
+
+            End Try
 
             UpdateRecordingStatus(title, startTime, "completed")
 

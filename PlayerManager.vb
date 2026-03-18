@@ -3,6 +3,9 @@ Imports System.Data
 Imports Microsoft.Data.Sqlite
 Imports System.Net
 Imports System.Runtime.InteropServices
+Imports System.Threading
+Imports System.Threading.Tasks
+
 Public Module PlayerManager
     <DllImport("user32.dll", SetLastError:=True)>
     Private Function SetWindowPos(hWnd As IntPtr,
@@ -12,10 +15,24 @@ Public Module PlayerManager
                                      cx As Integer,
                                      cy As Integer,
                                      uFlags As UInteger) As Boolean
-End Function
+    End Function
 
     Private _isStartingStream As Boolean = False
     Private vlcProcess As Process = Nothing
+
+    ' Safe helper: returns True only when a Process object is valid and still running.
+    Private Function IsProcessRunning(p As Process) As Boolean
+        If p Is Nothing Then
+            Return False
+        End If
+        Try
+            Return Not p.HasExited
+        Catch
+            ' If the Process object has no associated native process (disposed or otherwise),
+            ' treat it as not running.
+            Return False
+        End Try
+    End Function
 
     Public Sub PlayStream(server As String, user As String, pass As String, channel As String, streamId As String)
 
@@ -86,7 +103,6 @@ LIMIT 1
 
         Dim psi As New ProcessStartInfo(vlcPath)
         Dim args As Object
-        'GoTo newway
         args = {
         url,
         "--network-caching=1500",
@@ -94,22 +110,7 @@ LIMIT 1
         "--meta-title",
         windowTitle
     }
-newway:
-        GoTo skipnew
-        ' [2026-03-17] Final VLC Launch Configuration
-        args = {
-    "--no-qt-name-in-title",   ' Removes "VLC Media Player" suffix
-    "--no-video-title-show",   ' Disables the overlay text on the video
-    "--width=800",             ' Your fixed width
-    "--height=450",            ' Your fixed height
-    "--no-autoscale",          ' Forces window to stay at the defined size
-    "--network-caching=1500",  ' Buffer for smoother streaming
-    "--meta-title",
-    windowTitle,               ' Your custom window title
-    url                        ' URL must remain at the end
-}
-skipnew:
-        ' Clear any existing arguments to prevent doubling up
+        ' Final launch configuration (kept simple)
         psi.ArgumentList.Clear()
 
         For Each arg In args
@@ -118,11 +119,15 @@ skipnew:
             End If
         Next
 
-        ' Ensure the process starts correctly
         psi.UseShellExecute = False
         psi.CreateNoWindow = False
 
-        vlcProcess = Process.Start(psi)
+        Try
+            vlcProcess = Process.Start(psi)
+        Catch ex As Exception
+            Debug.WriteLine("PlayStream Process.Start error → " & ex.Message)
+            vlcProcess = Nothing
+        End Try
 
         If vlcProcess Is Nothing Then
             MsgBox("Process failed to start")
@@ -136,14 +141,13 @@ skipnew:
         ' WINDOW RESIZE (reliable)
         '---------------------------------------
         Task.Run(Sub()
-
                      Try
                          Dim handle As IntPtr = IntPtr.Zero
 
                          For i = 1 To 15
-                             Threading.Thread.Sleep(200)
+                             Thread.Sleep(200)
 
-                             If thisProcess Is Nothing OrElse thisProcess.HasExited Then Exit Sub
+                             If thisProcess Is Nothing OrElse Not IsProcessRunning(thisProcess) Then Exit Sub
 
                              thisProcess.Refresh()
                              handle = thisProcess.MainWindowHandle
@@ -157,127 +161,124 @@ skipnew:
 
                      Catch
                      End Try
-
                  End Sub)
 
         '---------------------------------------
         ' FAILURE DETECTION (safe)
         '---------------------------------------
         Task.Run(Sub()
-
-                     Threading.Thread.Sleep(3000)
-
-                     If thisProcess IsNot Nothing AndAlso thisProcess.HasExited Then
-                         LogStreamError(channel, url, "VLC failed to open stream")
-                         IncrementChannelFailure(channel)
-                     End If
-
+                     Thread.Sleep(3000)
+                     Try
+                         If thisProcess IsNot Nothing Then
+                             If Not IsProcessRunning(thisProcess) Then
+                                 LogStreamError(channel, url, "VLC failed to open stream")
+                                 IncrementChannelFailure(channel)
+                             End If
+                         End If
+                     Catch ex As Exception
+                         Debug.WriteLine("Failure detection error → " & ex.Message)
+                     End Try
                  End Sub)
 
         _isStartingStream = False
 
     End Sub
+
     Private Function TestStream(url As String) As Boolean
-
         Try
-
             Dim request = CType(WebRequest.Create(url), HttpWebRequest)
-
             request.Method = "HEAD"
             request.Timeout = 2000
-
             Using response = request.GetResponse()
             End Using
-
             Return True
-
         Catch
-
             Return False
-
         End Try
-
     End Function
 
-
     Private Sub IncrementChannelFailure(channel As String)
-
         Try
-
             Using con As New SqliteConnection($"Data Source={_DbPath}")
-
                 con.Open()
-
                 Dim cmd As New SqliteCommand("
 UPDATE channels
 SET failed_count = failed_count + 1
 WHERE nickname = @channel
 ", con)
-
                 cmd.Parameters.AddWithValue("@channel", channel)
-
                 cmd.ExecuteNonQuery()
-
             End Using
-
         Catch ex As Exception
-
             LogStreamError(channel, "", "Failed to update failed_count")
-
         End Try
-
     End Sub
-
 
     Private Sub LogStreamError(channel As String, url As String, message As String)
-
         Dim logFile = "stream_errors.log"
-
-        Dim line =
-        $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | {channel} | {url} | {message}"
-
+        Dim line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | {channel} | {url} | {message}"
         IO.File.AppendAllText(logFile, line & Environment.NewLine)
-
     End Sub
 
-
     Public Sub StopStream()
-
         Try
-            If vlcProcess Is Nothing Then Exit Sub
-
-            Dim proc = vlcProcess
-
-            ' 🚫 If starting OR process already replaced → ignore
+            ' Honor starting flag first
             If _isStartingStream Then Exit Sub
-            If proc IsNot vlcProcess Then Exit Sub
 
-            ' Already dead → cleanup
-            If proc.HasExited Then
-                proc.Dispose()
-                If proc Is vlcProcess Then vlcProcess = Nothing
-                Exit Sub
-            End If
+            ' Atomically take the current vlcProcess reference so background tasks won't race on vlcProcess
+            Dim proc As Process = Interlocked.Exchange(vlcProcess, Nothing)
 
-            ' ⚠️ Skip CloseMainWindow (unreliable for VLC)
+            If proc Is Nothing Then Exit Sub
 
-            ' Force kill safely
             Try
-                proc.Kill(True)
-            Catch
+                If IsProcessRunning(proc) Then
+                    Try
+                        proc.Kill(True)
+                    Catch
+                        ' ignore kill exceptions
+                    End Try
+                End If
+            Catch ex As Exception
+                Debug.WriteLine("StopStream kill check error → " & ex.Message)
+            Finally
+                Try
+                    proc.Dispose()
+                Catch
+                End Try
             End Try
-
-            proc.Dispose()
-
-            ' Only clear if still the same instance
-            If proc Is vlcProcess Then
-                vlcProcess = Nothing
-            End If
 
         Catch ex As Exception
             Debug.WriteLine("StopStream error → " & ex.Message)
         End Try
-
     End Sub
+
+    ' Public helpers for the UI to avoid inspecting Process objects directly
+    Public Function IsVlcRunningSafe() As Boolean
+        Try
+            Return vlcProcess IsNot Nothing AndAlso Not vlcProcess.HasExited
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Public Async Function WaitForVlcExitSafe() As Task
+        Dim p As Process = vlcProcess
+        If p Is Nothing Then Return
+
+        Try
+            While True
+                Try
+                    If p.HasExited Then Exit While
+                Catch
+                    ' Process object no longer associated — exit wait
+                    Exit While
+                End Try
+
+                Await Task.Delay(500)
+            End While
+        Catch
+            ' swallow
+        End Try
+    End Function
 
 End Module
