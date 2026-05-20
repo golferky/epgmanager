@@ -77,43 +77,43 @@ Public Module TitleHelpers
 
     End Function
     Public Function GetChannelName(db As String, channelId As String) As String
+        SyncLock GlobalState.DbLock
+            Using con As New SqliteConnection($"Data Source={db}")
+                con.Open()
 
-        Using con As New SqliteConnection($"Data Source={db}")
-            con.Open()
+                Dim cmd As New SQLiteCommand(
+                    "SELECT name FROM channels WHERE channel_id=@c", con)
 
-            Dim cmd As New SQLiteCommand(
-                "SELECT name FROM channels WHERE channel_id=@c", con)
+                cmd.Parameters.AddWithValue("@c", channelId)
 
-            cmd.Parameters.AddWithValue("@c", channelId)
+                Dim result = cmd.ExecuteScalar()
 
-            Dim result = cmd.ExecuteScalar()
-
-            If result IsNot Nothing Then
-                Return result.ToString()
-            End If
-        End Using
-
+                If result IsNot Nothing Then
+                    Return result.ToString()
+                End If
+            End Using
+        End SyncLock
         Return channelId
 
     End Function
     Function GetChannelRankFromDb(dbPath As String, channelId As String) As Integer
+        SyncLock GlobalState.DbLock
+            Using con As New SqliteConnection($"Data Source={dbPath}")
+                con.Open()
 
-        Using con As New SqliteConnection($"Data Source={dbPath}")
-            con.Open()
+                Dim cmd As New SQLiteCommand(
+                "SELECT quality_score FROM channels WHERE channel_id=@c", con)
 
-            Dim cmd As New SQLiteCommand(
-            "SELECT quality_score FROM channels WHERE channel_id=@c", con)
+                cmd.Parameters.AddWithValue("@c", channelId)
 
-            cmd.Parameters.AddWithValue("@c", channelId)
+                Dim result = cmd.ExecuteScalar()
 
-            Dim result = cmd.ExecuteScalar()
+                If result IsNot Nothing AndAlso Not IsDBNull(result) Then
+                    Return Convert.ToInt32(result)
+                End If
 
-            If result IsNot Nothing AndAlso Not IsDBNull(result) Then
-                Return Convert.ToInt32(result)
-            End If
-
-        End Using
-
+            End Using
+        End SyncLock
         Return 0
 
     End Function

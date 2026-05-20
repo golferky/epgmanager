@@ -3,29 +3,29 @@
 Public Module ChannelTagger
 
     Public Sub TagChannels(dbPath As String)
+        SyncLock GlobalState.DbLock
+            Using con As New SqliteConnection($"{dbPath};Pooling=False;")
 
-        Using con As New SqliteConnection($"{dbPath};Pooling=False;")
+                con.Open()
 
-            con.Open()
+                Console.WriteLine("Tagging channels...")
 
-            Console.WriteLine("Tagging channels...")
+                ' Reset types
+                Execute(con, "UPDATE channels SET type=NULL")
 
-            ' Reset types
-            Execute(con, "UPDATE channels SET type=NULL")
+                TagLocals(con)
+                TagSports(con)
+                TagNews(con)
+                TagKids(con)
+                TagMovies(con)
+                TagDocumentary(con)
+                TagInternational(con)
+                TagEntertainment(con)
 
-            TagLocals(con)
-            TagSports(con)
-            TagNews(con)
-            TagKids(con)
-            TagMovies(con)
-            TagDocumentary(con)
-            TagInternational(con)
-            TagEntertainment(con)
+                Console.WriteLine("Channel tagging complete.")
 
-            Console.WriteLine("Channel tagging complete.")
-
-        End Using
-
+            End Using
+        End SyncLock
     End Sub
 
 

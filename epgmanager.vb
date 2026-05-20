@@ -30,7 +30,10 @@ Public Module epgmanager
     Public _epgXMLTV As String = ""
     Public _epgUser As String = ""
     Public _epgPass As String = ""
+    Public _sdUser As String = ""
+    Public _sdPass As String = ""
     Public _plexMoviesPath As String = ""
+    Public _plexTvPath As String = ""
     Public _ffmpegPath As String = ""
     Public _userAgent As String = ""
     Public _rootPath As String = ""
@@ -44,6 +47,7 @@ Public Module epgmanager
 
     Private shutdownRequested As Boolean = False
     Public vlcProcess As Process = Nothing
+    Public _userAgentTM As String = ""
 
     Sub Main(args As String())
 
@@ -56,7 +60,6 @@ Public Module epgmanager
 
         Try
             If Not LoadConfig() Then
-
                 Console.WriteLine("Could not load config.json at " & MY_CONFIG)
                 Console.ReadLine()
                 Return
@@ -65,7 +68,6 @@ Public Module epgmanager
             ' ---------------------------------------------------
             ' 1️⃣ UPDATE STREAM IDS
             ' ---------------------------------------------------
-
             Dim localMoviesDb = DbCache.GetLocalCopy(_DbPath)
 
             Console.WriteLine("Original DB: " & _DbPath)
@@ -76,7 +78,7 @@ Public Module epgmanager
 
             Console.WriteLine("Updating stream IDs...")
 
-            Dim json = GetXtreamJson(_epgUrl, _epgUser, _epgPass, _userAgent).Result
+            Dim json = GetXtreamJson(_epgUrl, _epgUser, _epgPass, _userAgentTM)
 
             If json.Contains("""error""") Then
                 Console.WriteLine("XTREAM API ERROR → " & json)
@@ -84,21 +86,20 @@ Public Module epgmanager
             End If
 
             Dim streams =
-        Newtonsoft.Json.JsonConvert.DeserializeObject(Of List(Of XtreamStream))(json)
+            Newtonsoft.Json.JsonConvert.DeserializeObject(Of List(Of XtreamStream))(json)
 
             UpdateStreamIds(_epgUrl, _epgUser, _epgPass, streams, localMoviesDb)
 
             Console.WriteLine("Stream ID update complete.")
 
-
             ' ---------------------------------------------------
             ' 2️⃣ GUIDE BUILD
             ' ---------------------------------------------------
             GuideUpdater.UpdateGuide()
+
             ' ---------------------------------------------------
             ' 3️⃣ SUGGESTIONS ENGINE
             ' ---------------------------------------------------
-
             Dim localHistoryDb = _HistPath
 
             Dim stats As New EngineStats
@@ -124,24 +125,24 @@ Public Module epgmanager
             Console.WriteLine("Movie channels loaded: " & myChannels.Count)
 
             Dim step1 = scored _
-        .Where(Function(x) myChannels.Contains(x.Candidate.Channel)).ToList()
+            .Where(Function(x) myChannels.Contains(x.Candidate.Channel)).ToList()
 
             Dim step2 = step1 _
-        .Where(Function(x) Not ChannelLookup.IsForeign(localMoviesDb, x.Candidate.Channel)).ToList()
+            .Where(Function(x) Not ChannelLookup.IsForeign(localMoviesDb, x.Candidate.Channel)).ToList()
 
             Dim step3 = step2 _
-        .Where(Function(x) ChannelLookup.IsMovieChannel(localMoviesDb, x.Candidate.Channel)).ToList()
+            .Where(Function(x) ChannelLookup.IsMovieChannel(localMoviesDb, x.Candidate.Channel)).ToList()
 
             Dim step4 = step3 _
-        .Where(Function(x) x.Candidate.StartTime > DateTime.Now).ToList()
+            .Where(Function(x) x.Candidate.StartTime > DateTime.Now).ToList()
 
             Dim step5 = step4 _
-        .GroupBy(Function(x) NormalizeTitle(x.Candidate.Title)) _
-        .Select(Function(g) g _
-            .OrderByDescending(Function(m) TitleHelpers.GetChannelPriority(m.Candidate.Channel)) _
-            .ThenByDescending(Function(m) IsHdChannel(m.Candidate.Channel)) _
-            .ThenBy(Function(m) m.Candidate.StartTime) _
-            .First()).ToList()
+            .GroupBy(Function(x) NormalizeTitle(x.Candidate.Title)) _
+            .Select(Function(g) g _
+                .OrderByDescending(Function(m) TitleHelpers.GetChannelPriority(m.Candidate.Channel)) _
+                .ThenByDescending(Function(m) IsHdChannel(m.Candidate.Channel)) _
+                .ThenBy(Function(m) m.Candidate.StartTime) _
+                .First()).ToList()
 
             Dim owned As New List(Of GuideCandidate)
 
@@ -160,9 +161,9 @@ Public Module epgmanager
             Next
 
             Dim planned = step5 _
-        .Where(Function(x) Not MovieExistsInLibrary(x.Candidate.Title)) _
-        .OrderBy(Function(x) x.Candidate.StartTime) _
-        .Take(100)
+            .Where(Function(x) Not MovieExistsInLibrary(x.Candidate.Title)) _
+            .OrderBy(Function(x) x.Candidate.StartTime) _
+            .Take(100)
 
             Console.WriteLine()
             Console.WriteLine("FILTER PIPELINE")
@@ -191,26 +192,20 @@ Public Module epgmanager
             Dim dashboardTop As Integer = Console.CursorTop
             Dim dashboardHeight As Integer = 30
 
+            ' ---------------------------------------------------
+            ' 4️⃣ MAIN SCHEDULER LOOP
+            ' ---------------------------------------------------
             While True
 
                 ' Allow graceful shutdown
                 If Console.KeyAvailable Then
                     Dim key = Console.ReadKey(True)
-
                     If key.Key = ConsoleKey.Q Then
                         shutdownRequested = True
                         Console.WriteLine()
                         Console.WriteLine("Graceful shutdown requested...")
                     End If
                 End If
-
-                Console.SetCursorPosition(0, dashboardTop)
-
-                'For i = 0 To dashboardHeight - 1
-                '    Console.SetCursorPosition(0, dashboardTop)
-                '    Console.Write(New String(vbLf, dashboardHeight))
-                '    Console.SetCursorPosition(0, dashboardTop)
-                'Next
 
                 Console.SetCursorPosition(0, dashboardTop)
 
@@ -227,42 +222,30 @@ Public Module epgmanager
                 Dim nextMovie = planned.FirstOrDefault()
 
                 If nextMovie IsNot Nothing Then
-
                     Dim diff = (nextMovie.Candidate.StartTime - DateTime.Now).TotalSeconds
                     Dim mins = Math.Floor(diff / 60)
                     Dim secs = diff Mod 60
-
                     Dim ch = ChannelLookup.GetChannelInfo(localMoviesDb, nextMovie.Candidate.Channel)
-
                     WriteLineClean($"{nextMovie.Candidate.StartTime:HH:mm}   {ch.Item1,-30} {nextMovie.Candidate.Title,-35} {mins,2}:{secs:00}")
-
                 End If
 
                 ' ---------------------------
                 ' Scheduler logic
                 ' ---------------------------
-
                 For Each s In planned
-                    '20260309 debug
-                    If Not s.Candidate.Title.ToLower.Contains("planes") Then
-                        Continue For
-                    Else
-                        Console.WriteLine($"DEBUG: Found candidate → " & s.Candidate.Title)
-                    End If
+
                     If shutdownRequested Then Continue For
 
                     Dim key =
-                s.Candidate.Channel & "|" &
-                s.Candidate.StartTime.ToString("yyyyMMddHHmm")
+                    s.Candidate.Channel & "|" &
+                    s.Candidate.StartTime.ToString("yyyyMMddHHmm")
+
                     Dim diff = (s.Candidate.StartTime - DateTime.Now).TotalSeconds
 
                     ' Skip movies already started
-                    If diff < 0 Then
-                        'Log("SKIPPED → already started → " & s.Candidate.Title)
-                        Continue For
-                    End If
+                    If diff < 0 Then Continue For
 
-                    ' Trigger recording shortly before start
+                    ' Trigger recording 10 minutes before start
                     If diff <= 600 Then
 
                         If started.Add(key) Then
@@ -276,22 +259,25 @@ Public Module epgmanager
                             Console.WriteLine("TRIGGERING RECORDER → " & s.Candidate.Title)
 
                             DvrDashboard.AddRecording(
-        s.Candidate.Title,
-        ch.Item1,
-        s.Candidate.EndTime)
+                            s.Candidate.Title,
+                            ch.Item1,
+                            s.Candidate.EndTime)
 
-                            Recorder.RecordMovie(
-        s.Candidate.Title,
-        streamId,
-        s.Candidate.StartTime,
-        s.Candidate.EndTime)
+                            Dim t As New Thread(Sub()
+                                                    Recorder.RecordMovie(
+                                s.Candidate.Title,
+                                streamId,
+                                s.Candidate.StartTime,
+                                s.Candidate.EndTime)
+                                                End Sub)
+                            t.IsBackground = True
+                            t.Start()
 
                             Dim msg =
-                        $"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
+                            $"▶ RECORDING NOW → {DateTime.Now:HH:mm:ss} | {ch.Item1} | {s.Candidate.Title}"
 
                             recordingLog.Add(msg)
-
-                            Log(msg)
+                            Logger.Log(msg)
 
                         End If
 
@@ -313,22 +299,17 @@ Public Module epgmanager
                 End If
 
                 For i = 1 To 50
-
                     If Console.KeyAvailable Then
-
                         Dim key = Console.ReadKey(True)
-
                         If key.Key = ConsoleKey.Q Then
                             shutdownRequested = True
                             Console.WriteLine()
                             Console.WriteLine("Graceful shutdown requested...")
                         End If
-
                     End If
-
                     Thread.Sleep(100)
-
                 Next
+
             End While
 
             CleanupTempFiles()
@@ -342,6 +323,7 @@ Public Module epgmanager
         End Try
 
     End Sub
+
     Private Sub CleanupTempFiles()
 
         Dim tmpFiles = Directory.GetFiles(_plexMoviesPath, "*.tmpmp4", SearchOption.AllDirectories)
@@ -375,88 +357,75 @@ Public Module epgmanager
 
     End Sub
     ' --- DOWNLOAD LOGIC (USER ARCHIVE VERSION) ---
-    Async Function DownloadGuideProperly(url As String, localPath As String) As Task
+    Public Sub DownloadGuideProperly(url As String, localPath As String)
+        Try
+            Dim request As Net.HttpWebRequest = Net.WebRequest.Create(url)
+            request.Timeout = 300000
+            request.UserAgent = _userAgent  ' ← add this, but switch to TiViMate agent
 
-        Dim handler As New HttpClientHandler()
-        handler.AutomaticDecompression =
-            Net.DecompressionMethods.GZip Or Net.DecompressionMethods.Deflate
+            ' Add random delay 1-10 seconds to avoid looking like a bot
+            Thread.Sleep(New Random().Next(1000, 10000))
 
-        Using client As New HttpClient(handler)
+            Using response = request.GetResponse
+                Using responseStream = response.GetResponseStream()
+                    Using fileStream As New FileStream(localPath, FileMode.Create, FileAccess.Write)
+                        responseStream.CopyTo(fileStream)
+                    End Using
+                End Using
+            End Using
 
-            client.DefaultRequestHeaders.Clear()
-
-            client.DefaultRequestHeaders.Add("User-Agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-
-            client.DefaultRequestHeaders.Add("Accept",
-                "text/xml,application/xml;q=0.9,*/*;q=0.8")
-
-            client.DefaultRequestHeaders.Add("Accept-Language",
-                "en-US,en;q=0.9")
-
-            client.DefaultRequestHeaders.Add("Connection", "keep-alive")
-
-            Dim response = Await client.GetAsync(url)
-
-            response.EnsureSuccessStatusCode()
-
-            Dim bytes = Await response.Content.ReadAsByteArrayAsync()
-
-            ' Safety check to prevent saving HTML
-            Dim textCheck = System.Text.Encoding.UTF8.GetString(bytes)
-
-            If textCheck.StartsWith("<!doctype", StringComparison.OrdinalIgnoreCase) Then
-                Throw New Exception("Guide returned HTML instead of XML.")
-            End If
-
-            File.WriteAllBytes(localPath, bytes)
-
-            Console.WriteLine("[DL] Guide downloaded successfully.")
-
-        End Using
-
-    End Function
+        Catch ex As Net.WebException When CType(ex.Response, Net.HttpWebResponse)?.StatusCode = Net.HttpStatusCode.Unauthorized
+            ' 401 — back off and log, don't crash
+            Logger.Log("Guide download blocked (401) — will retry next cycle", "GuideUpdater", "DownloadGuideProperly", "WARN")
+            Thread.Sleep(TimeSpan.FromMinutes(30))  ' back off 30 mins
+        Catch ex As Exception
+            Logger.Log("Download failed: " & ex.Message, "GuideUpdater", "DownloadGuideProperly", "ERROR")
+        End Try
+    End Sub
     ' --- GUIDE PROCESSING ---
     Sub ProcessGuideXmls()
         Dim xmlFiles = Directory.GetFiles(_guideDir, "*.xml").Where(Function(f) (DateTime.Now - File.GetLastWriteTime(f)).TotalHours < 24).ToArray()
         If xmlFiles.Length = 0 Then Return
         Dim keys As New HashSet(Of String)
-        Using conn As New SqliteConnection("Data Source=" & _localHist & ";Version=3;")
-            conn.Open()
-            Using cmd = New SqliteCommand("SELECT title || start || channel FROM recording_history", conn)
-                Using rdr = cmd.ExecuteReader()
-                    While rdr.Read()
-                        keys.Add(rdr(0).ToString())
-                    End While
+        SyncLock GlobalState.DbLock
+            Using conn As New SqliteConnection("Data Source=" & _localHist & ";")
+                conn.Open()
+                Using cmd = New SqliteCommand("Select title || start || channel FROM recording_history", conn)
+                    Using rdr = cmd.ExecuteReader()
+                        While rdr.Read()
+                            keys.Add(rdr(0).ToString())
+                        End While
+                    End Using
+                End Using
+                Using trans = conn.BeginTransaction()
+                    For Each file In xmlFiles
+                        Dim nick = If(Path.GetFileName(file).ToLower() = "guide.xml", "Source_PrimeStreams", Path.GetFileName(file))
+                        DrawProgressBar(Array.IndexOf(xmlFiles, file) + 1, xmlFiles.Length, "[XML] " & nick)
+                        Dim doc As New XmlDocument()
+                        doc.Load(file)
+                        For Each node As XmlNode In doc.SelectNodes("//programme")
+                            Dim t = node.SelectSingleNode("title")?.InnerText
+                            Dim s = node.Attributes("start")?.Value.Substring(0, 14)
+                            Dim c = node.Attributes("channel")?.Value
+                            If t Is Nothing Or s Is Nothing Or c Is Nothing OrElse keys.Contains(t & s & c) Then Continue For
+                            Using cmdIns = New SqliteCommand("INSERT INTO recording_history (title, desc, channel, start, Stop, xml_source, my_channel) VALUES (@t, @d, @c, @s, @e, @x, @m)", conn)
+                                cmdIns.Parameters.AddWithValue("@t", t)
+                                cmdIns.Parameters.AddWithValue("@d", node.SelectSingleNode("desc")?.InnerText)
+                                cmdIns.Parameters.AddWithValue("@c", c)
+                                cmdIns.Parameters.AddWithValue("@s", s)
+                                cmdIns.Parameters.AddWithValue("@e", node.Attributes("Stop").Value.Substring(0, 14))
+                                cmdIns.Parameters.AddWithValue("@x", nick)
+                                cmdIns.Parameters.AddWithValue("@m", If(_preferredChannels.Contains(c), 1, 0))
+                                cmdIns.ExecuteNonQuery()
+                            End Using
+                            keys.Add(t & s & c)
+                        Next
+                    Next
+                    trans.Commit()
                 End Using
             End Using
-            Using trans = conn.BeginTransaction()
-                For Each file In xmlFiles
-                    Dim nick = If(Path.GetFileName(file).ToLower() = "guide.xml", "Source_PrimeStreams", Path.GetFileName(file))
-                    DrawProgressBar(Array.IndexOf(xmlFiles, file) + 1, xmlFiles.Length, "[XML] " & nick)
-                    Dim doc As New XmlDocument()
-                    doc.Load(file)
-                    For Each node As XmlNode In doc.SelectNodes("//programme")
-                        Dim t = node.SelectSingleNode("title")?.InnerText
-                        Dim s = node.Attributes("start")?.Value.Substring(0, 14)
-                        Dim c = node.Attributes("channel")?.Value
-                        If t Is Nothing Or s Is Nothing Or c Is Nothing OrElse keys.Contains(t & s & c) Then Continue For
-                        Using cmdIns = New SqliteCommand("INSERT INTO recording_history (title, desc, channel, start, stop, xml_source, my_channel) VALUES (@t, @d, @c, @s, @e, @x, @m)", conn)
-                            cmdIns.Parameters.AddWithValue("@t", t)
-                            cmdIns.Parameters.AddWithValue("@d", node.SelectSingleNode("desc")?.InnerText)
-                            cmdIns.Parameters.AddWithValue("@c", c)
-                            cmdIns.Parameters.AddWithValue("@s", s)
-                            cmdIns.Parameters.AddWithValue("@e", node.Attributes("stop").Value.Substring(0, 14))
-                            cmdIns.Parameters.AddWithValue("@x", nick)
-                            cmdIns.Parameters.AddWithValue("@m", If(_preferredChannels.Contains(c), 1, 0))
-                            cmdIns.ExecuteNonQuery()
-                        End Using
-                        keys.Add(t & s & c)
-                    Next
-                Next
-                trans.Commit()
-            End Using
-        End Using
+
+        End SyncLock
     End Sub
 
     Sub GenerateUpcomingPremiumReport(liveMap As Dictionary(Of String, String))
@@ -476,7 +445,7 @@ Public Module epgmanager
                         Dim startRaw = node.Attributes("start")?.Value.Substring(0, 14)
                         If startRaw > nowStr Then
                             Dim startDt = DateTime.ParseExact(startRaw, "yyyyMMddHHmmss", Nothing)
-                            Dim stopDt = DateTime.ParseExact(node.Attributes("stop").Value.Substring(0, 14), "yyyyMMddHHmmss", Nothing)
+                            Dim stopDt = DateTime.ParseExact(node.Attributes("Stop").Value.Substring(0, 14), "yyyyMMddHHmmss", Nothing)
                             Dim duration = CInt((stopDt - startDt).TotalMinutes)
                             Dim cleanId = Regex.Replace(chanId.Split("."c)(0).ToUpper(), "[^A-Z0-9]", "")
                             Dim chNum = If(liveMap.ContainsKey(cleanId), liveMap(cleanId), "---")
@@ -497,26 +466,27 @@ Public Module epgmanager
         Dim seen As New HashSet(Of String)
         Console.WriteLine(String.Format("{0,-18} | {1,-10} | {2,-5} | {3,-5} | {4,-18} | {5}", "START TIME", "FINISH", "DUR", "CH#", "CHANNEL", "TITLE"))
         Console.WriteLine(New String("-"c, 110))
-
-        Using conn As New SqliteConnection("Data Source=" & _localHist & ";Version=3;")
-            conn.Open()
-            For Each m In upcoming
-                Dim key = m("title").ToString() & m("start").ToString()
-                If Not seen.Contains(key) Then
-                    Using cmd = New SqliteCommand("SELECT 1 FROM recording_history WHERE title = @t AND owned = 1 LIMIT 1", conn)
-                        cmd.Parameters.AddWithValue("@t", m("title"))
-                        Dim isOwned = (cmd.ExecuteScalar() IsNot Nothing)
-                        If isOwned Then Console.ForegroundColor = ConsoleColor.DarkGray Else Console.ForegroundColor = ConsoleColor.White
-                        Dim cleanChan = m("chan").ToString().Replace("US|", "").Replace("UK|", "")
-                        If cleanChan.Length > 17 Then cleanChan = cleanChan.Substring(0, 17)
-                        Console.WriteLine(String.Format("{0,-18} | {1,-10} | {2,3}m  | {3,-5} | {4,-18} | {5}{6}{7}",
-                                m("start"), m("end"), m("dur"), m("num"), cleanChan, If(CInt(m("dur")) >= 140, "🚩 ", "   "), m("title"), If(isOwned, " [OWNED]", "")))
-                        Console.ResetColor()
-                        seen.Add(key)
-                    End Using
-                End If
-            Next
-        End Using
+        SyncLock GlobalState.DbLock
+            Using conn As New SqliteConnection("Data Source=" & _localHist & ";")
+                conn.Open()
+                For Each m In upcoming
+                    Dim key = m("title").ToString() & m("start").ToString()
+                    If Not seen.Contains(key) Then
+                        Using cmd = New SqliteCommand("SELECT 1 FROM recording_history WHERE title = @t AND owned = 1 LIMIT 1", conn)
+                            cmd.Parameters.AddWithValue("@t", m("title"))
+                            Dim isOwned = (cmd.ExecuteScalar() IsNot Nothing)
+                            If isOwned Then Console.ForegroundColor = ConsoleColor.DarkGray Else Console.ForegroundColor = ConsoleColor.White
+                            Dim cleanChan = m("chan").ToString().Replace("US|", "").Replace("UK|", "")
+                            If cleanChan.Length > 17 Then cleanChan = cleanChan.Substring(0, 17)
+                            Console.WriteLine(String.Format("{0,-18} | {1,-10} | {2,3}m  | {3,-5} | {4,-18} | {5}{6}{7}",
+                                    m("start"), m("end"), m("dur"), m("num"), cleanChan, If(CInt(m("dur")) >= 140, "🚩 ", "   "), m("title"), If(isOwned, " [OWNED]", "")))
+                            Console.ResetColor()
+                            seen.Add(key)
+                        End Using
+                    End If
+                Next
+            End Using
+        End SyncLock
     End Sub
 
     ' --- DATABASE & SYSTEM HELPERS ---
@@ -536,47 +506,53 @@ Public Module epgmanager
     End Sub
 
     Sub EnsureOwnedColumnExists()
-        Using conn As New SqliteConnection("Data Source=" & _localHist & ";Version=3;")
-            conn.Open()
-            Dim hasOwned = False
-            Using cmd = New SqliteCommand("PRAGMA table_info(recording_history)", conn)
-                Using rdr = cmd.ExecuteReader()
-                    While rdr.Read()
-                        If rdr("name").ToString().ToLower() = "owned" Then hasOwned = True
-                    End While
+        SyncLock GlobalState.DbLock
+            Using conn As New SqliteConnection("Data Source=" & _localHist & ";")
+                conn.Open()
+                Dim hasOwned = False
+                Using cmd = New SqliteCommand("PRAGMA table_info(recording_history)", conn)
+                    Using rdr = cmd.ExecuteReader()
+                        While rdr.Read()
+                            If rdr("name").ToString().ToLower() = "owned" Then hasOwned = True
+                        End While
+                    End Using
                 End Using
+                If Not hasOwned Then
+                    Using cmdAlt = New SqliteCommand("ALTER TABLE recording_history ADD COLUMN owned INTEGER DEFAULT 0", conn)
+                        cmdAlt.ExecuteNonQuery()
+                    End Using
+                End If
             End Using
-            If Not hasOwned Then
-                Using cmdAlt = New SqliteCommand("ALTER TABLE recording_history ADD COLUMN owned INTEGER DEFAULT 0", conn)
-                    cmdAlt.ExecuteNonQuery()
-                End Using
-            End If
-        End Using
+        End SyncLock
     End Sub
 
     Sub LoadPreferredChannels()
         _preferredChannels.Clear()
-        Using conn As New SqliteConnection("Data Source=" & _localDb & ";Version=3;")
-            conn.Open()
-            Using cmd = New SqliteCommand("SELECT channel_id FROM channels WHERE my_channel > 0", conn)
-                Using rdr = cmd.ExecuteReader()
-                    While rdr.Read()
-                        _preferredChannels.Add(rdr(0).ToString())
-                    End While
+        SyncLock GlobalState.DbLock
+            Using conn As New SqliteConnection("Data Source=" & _localDb & ";")
+                conn.Open()
+                Using cmd = New SqliteCommand("SELECT channel_id FROM channels WHERE my_channel > 0", conn)
+                    Using rdr = cmd.ExecuteReader()
+                        While rdr.Read()
+                            _preferredChannels.Add(rdr(0).ToString())
+                        End While
+                    End Using
                 End Using
             End Using
-        End Using
+        End SyncLock
     End Sub
 
     Sub EvaluateOwnedMovies()
         Console.WriteLine(vbCrLf & "[MDB] Syncing Master Database...")
-        Using conn As New SqliteConnection("Data Source=" & _localHist & ";Version=3;")
-            conn.Open()
-            Using cmdAttach = New SqliteCommand("ATTACH DATABASE '" & _localDb & "' AS mdb", conn) : cmdAttach.ExecuteNonQuery() : End Using
-            Dim count = New SqliteCommand("UPDATE recording_history SET owned = 1 WHERE UPPER(title) IN (SELECT UPPER(title) FROM mdb.master_titles)", conn).ExecuteNonQuery()
-            Console.WriteLine("      Updated " & count & " records.")
-            Using cmdDetach = New SqliteCommand("DETACH DATABASE mdb", conn) : cmdDetach.ExecuteNonQuery() : End Using
-        End Using
+        SyncLock GlobalState.DbLock
+            Using conn As New SqliteConnection("Data Source=" & _localHist & ";")
+                conn.Open()
+                Using cmdAttach = New SqliteCommand("ATTACH DATABASE '" & _localDb & "' AS mdb", conn) : cmdAttach.ExecuteNonQuery() : End Using
+                Dim count = New SqliteCommand("UPDATE recording_history SET owned = 1 WHERE UPPER(title) IN (SELECT UPPER(title) FROM mdb.master_titles)", conn).ExecuteNonQuery()
+                Console.WriteLine("      Updated " & count & " records.")
+                Using cmdDetach = New SqliteCommand("DETACH DATABASE mdb", conn) : cmdDetach.ExecuteNonQuery() : End Using
+            End Using
+        End SyncLock
     End Sub
 
     Sub PrintNasStorageStats()
@@ -593,25 +569,27 @@ Public Module epgmanager
 
     Sub UpdateHistoryFromNasFiles()
         If Not Directory.Exists(_nasWarehouseDir) Then Return
-        Using conn As New SqliteConnection("Data Source=" & _localHist & ";Version=3;")
-            conn.Open()
-            For Each filePath In Directory.GetFiles(_nasWarehouseDir, "*.ts")
-                Dim fn = Path.GetFileName(filePath)
-                Dim parts = Regex.Replace(fn, "-Copy\(\d+\)", "").Split("_"c)
-                If parts.Length >= 3 Then
-                    Dim title = String.Join(" ", parts.Take(parts.Length - 2)).Replace("_", " ")
-                    Dim time = parts(parts.Length - 2) & parts(parts.Length - 1).Replace(".ts", "")
-                    Using cmdUpd = New SqliteCommand("UPDATE recording_history SET status = 'recorded', filename = @fn, file_size = @fs, timestamp = @ts WHERE UPPER(title) = @t AND start LIKE @s AND status = ''", conn)
-                        cmdUpd.Parameters.AddWithValue("@fn", fn)
-                        cmdUpd.Parameters.AddWithValue("@fs", (New FileInfo(filePath).Length / 1024 / 1024).ToString("F0") & " MB")
-                        cmdUpd.Parameters.AddWithValue("@ts", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))
-                        cmdUpd.Parameters.AddWithValue("@t", title.ToUpper())
-                        cmdUpd.Parameters.AddWithValue("@s", time & "%")
-                        cmdUpd.ExecuteNonQuery()
-                    End Using
-                End If
-            Next
-        End Using
+        SyncLock GlobalState.DbLock
+            Using conn As New SqliteConnection("Data Source=" & _localHist & ";")
+                conn.Open()
+                For Each filePath In Directory.GetFiles(_nasWarehouseDir, "*.ts")
+                    Dim fn = Path.GetFileName(filePath)
+                    Dim parts = Regex.Replace(fn, "-Copy\(\d+\)", "").Split("_"c)
+                    If parts.Length >= 3 Then
+                        Dim title = String.Join(" ", parts.Take(parts.Length - 2)).Replace("_", " ")
+                        Dim time = parts(parts.Length - 2) & parts(parts.Length - 1).Replace(".ts", "")
+                        Using cmdUpd = New SqliteCommand("UPDATE recording_history SET status = 'recorded', filename = @fn, file_size = @fs, timestamp = @ts WHERE UPPER(title) = @t AND start LIKE @s AND status = ''", conn)
+                            cmdUpd.Parameters.AddWithValue("@fn", fn)
+                            cmdUpd.Parameters.AddWithValue("@fs", (New FileInfo(filePath).Length / 1024 / 1024).ToString("F0") & " MB")
+                            cmdUpd.Parameters.AddWithValue("@ts", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))
+                            cmdUpd.Parameters.AddWithValue("@t", title.ToUpper())
+                            cmdUpd.Parameters.AddWithValue("@s", time & "%")
+                            cmdUpd.ExecuteNonQuery()
+                        End Using
+                    End If
+                Next
+            End Using
+        End SyncLock
     End Sub
     Function LoadConfig() As Boolean
 
@@ -639,12 +617,18 @@ Public Module epgmanager
                 _nasWarehouseDir = root.GetProperty("WAREHOUSE").GetString()
                 _nasIp = root.GetProperty("MY_NAS_IP").GetString()
                 _rootPath = root.GetProperty("WINDOWS_ROOT").GetString()
+                _plexMoviesPath = root.GetProperty("MY_NAS_IP").GetString() & "" & root.GetProperty("PLEX_MOVIES_ROOT").GetString()
+                _plexTvPath = root.GetProperty("MY_NAS_IP").GetString() & "" & root.GetProperty("PLEX_TV_ROOT").GetString()
 
                 If root.TryGetProperty("EPG_BASE_URL", Nothing) Then _epgUrl = root.GetProperty("EPG_BASE_URL").GetString()
                 If root.TryGetProperty("EPG_XMLTV", Nothing) Then _epgXMLTV = root.GetProperty("EPG_XMLTV").GetString()
                 If root.TryGetProperty("EPG_USER", Nothing) Then _epgUser = root.GetProperty("EPG_USER").GetString()
                 If root.TryGetProperty("EPG_PASS", Nothing) Then _epgPass = root.GetProperty("EPG_PASS").GetString()
                 If root.TryGetProperty("USER_AGENT", Nothing) Then _userAgent = root.GetProperty("USER_AGENT").GetString()
+                If root.TryGetProperty("USER_AGENT_TM", Nothing) Then _userAgentTM = root.GetProperty("USER_AGENT_TM").GetString()
+                If root.TryGetProperty("SD_USER", Nothing) Then _sdUser = root.GetProperty("SD_USER").GetString()
+                If root.TryGetProperty("SD_PASS", Nothing) Then _sdPass = root.GetProperty("SD_PASS").GetString()
+
                 _plexMoviesPath = root.GetProperty("MY_NAS_IP").GetString() & "" & root.GetProperty("PLEX_MOVIES_ROOT").GetString()
 
                 Dim rootDir As String
@@ -658,7 +642,16 @@ Public Module epgmanager
                     _adbExePath = root.GetProperty("ADB_MAC_PATH").GetString()
                     _ffmpegPath = root.GetProperty("FFMPEG_MAC").GetString()
                 End If
+                ' Mac settings
+                GlobalState.MacHost = root.GetProperty("MAC_HOST").GetString()
+                GlobalState.MacUser = root.GetProperty("MAC_USER").GetString()
+                GlobalState.MacPort = root.GetProperty("MAC_PORT").GetInt32()
 
+                Dim target = root.GetProperty("EXECUTION_TARGET").GetString()
+                GlobalState.CurrentTarget = If(
+    target = "RemoteMac",
+    ExecutionTarget.RemoteMac,
+    ExecutionTarget.LocalWindows)
                 Return True
 
             Catch ex As Exception
@@ -668,7 +661,6 @@ Public Module epgmanager
 
         Catch : Return False : End Try
     End Function
-
     Sub RunADB(args As String)
         Dim psi As New ProcessStartInfo(_adbExePath, "-s " & _firestickIp & ":5555 " & args)
         psi.WindowStyle = ProcessWindowStyle.Hidden
@@ -685,40 +677,57 @@ Public Module epgmanager
         Catch : End Try
     End Sub
     Sub RebuildGuideDatabase(dbPath As String)
+        SyncLock GlobalState.DbLock
+            Using con As New SqliteConnection($"Data Source={dbPath}")
+                con.Open()
 
-        Using con As New SqliteConnection($"Data Source={dbPath}")
-            con.Open()
+                ' Create table if it doesn't exist (won't touch existing data)
+                Dim createSql = "
+                CREATE TABLE IF NOT EXISTS guide (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT,
+                    normalized_title TEXT,
+                    channel TEXT,
+                    start_utc DATETIME,
+                    end_utc DATETIME,
+                    xml_file TEXT,
+                    master_title_id INTEGER REFERENCES master_titles(id)
+                );"
+                Using cmd As New SqliteCommand(createSql, con)
+                    cmd.ExecuteNonQuery()
+                End Using
 
-            Dim sql =
-        "
-DROP TABLE IF EXISTS guide;
-CREATE TABLE guide (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT,
-    normalized_title TEXT,
-    channel TEXT,
-    start_utc DATETIME,
-    end_utc DATETIME,
-    xml_file TEXT
-);
-"
+                ' Add master_title_id if missing (safe on existing databases)
+                Try
+                    Using cmd As New SqliteCommand("ALTER TABLE guide ADD COLUMN master_title_id INTEGER REFERENCES master_titles(id)", con)
+                        cmd.ExecuteNonQuery()
+                    End Using
+                Catch
+                    ' Column already exists — ignore
+                End Try
 
-            Using cmd As New SqliteCommand(sql, con)
-                cmd.ExecuteNonQuery()
+                ' Clean up old entries instead of dropping the table
+                Using cmd As New SqliteCommand("
+                DELETE FROM guide
+                WHERE end_utc < datetime('now', 'localtime', '-7 days')", con)
+                    cmd.ExecuteNonQuery()
+                End Using
+
+                Debug.WriteLine("SD → Guide database rebuilt (history preserved)")
             End Using
-
-        End Using
-
+        End SyncLock
     End Sub
 
     Sub CreateGuideIndexes(dbPath As String)
 
-        Using con As New SqliteConnection($"Data Source={dbPath}")
-            con.Open()
+        SyncLock GlobalState.DbLock
 
-            ' Remove duplicates before creating unique index
-            Dim cleanupSql =
-    "
+            Using con As New SqliteConnection($"Data Source={dbPath}")
+                con.Open()
+
+                ' Remove duplicates before creating unique index
+                Dim cleanupSql =
+        "
 DELETE FROM guide
 WHERE rowid NOT IN (
     SELECT MIN(rowid)
@@ -727,12 +736,12 @@ WHERE rowid NOT IN (
 );
 "
 
-            Using cleanup As New SqliteCommand(cleanupSql, con)
-                cleanup.ExecuteNonQuery()
-            End Using
+                Using cleanup As New SqliteCommand(cleanupSql, con)
+                    cleanup.ExecuteNonQuery()
+                End Using
 
-            Dim sql =
-    "
+                Dim sql =
+        "
 DROP INDEX IF EXISTS idx_guide_start;
 
 CREATE INDEX IF NOT EXISTS idx_guide_start_cover
@@ -747,11 +756,12 @@ ON guide(normalized_title, start_utc);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_guide_unique
 ON guide(channel, start_utc, normalized_title);
 "
-            Using cmd As New SqliteCommand(sql, con)
-                cmd.ExecuteNonQuery()
-            End Using
+                Using cmd As New SqliteCommand(sql, con)
+                    cmd.ExecuteNonQuery()
+                End Using
 
-        End Using
+            End Using
+        End SyncLock
 
     End Sub
 
@@ -765,25 +775,27 @@ ON guide(channel, start_utc, normalized_title);
     Public Function GuideDbIsEmpty(dbPath As String) As Boolean
 
         Try
-            Using con As New SqliteConnection($"Data Source={dbPath}")
-                con.Open()
+            SyncLock GlobalState.DbLock
+                Using con As New SqliteConnection($"Data Source={dbPath}")
+                    con.Open()
 
-                ' does table exist?
-                Dim tableCmd As New SqliteCommand(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='guide'", con)
+                    ' does table exist?
+                    Dim tableCmd As New SqliteCommand(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='guide'", con)
 
-                If tableCmd.ExecuteScalar() Is Nothing Then
-                    Return True ' table missing = empty
-                End If
+                    If tableCmd.ExecuteScalar() Is Nothing Then
+                        Return True ' table missing = empty
+                    End If
 
-                ' count rows
-                Dim countCmd As New SqliteCommand(
-                    "SELECT COUNT(*) FROM guide", con)
+                    ' count rows
+                    Dim countCmd As New SqliteCommand(
+                        "SELECT COUNT(*) FROM guide", con)
 
-                Dim count = Convert.ToInt32(countCmd.ExecuteScalar())
+                    Dim count = Convert.ToInt32(countCmd.ExecuteScalar())
 
-                Return count = 0
-            End Using
+                    Return count = 0
+                End Using
+            End SyncLock
 
         Catch
             ' any error → treat as empty so we rebuild
@@ -794,100 +806,96 @@ ON guide(channel, start_utc, normalized_title);
     Private Function LoadMyChannels(db As String) As HashSet(Of String)
 
         Dim channels As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        SyncLock GlobalState.DbLock
+            Using conn As New SqliteConnection("Data Source=" & db)
+                conn.Open()
 
-        Using conn As New SqliteConnection("Data Source=" & db)
-            conn.Open()
+                Dim cmd As New SqliteCommand(
+                    "SELECT channel_id FROM channels WHERE is_movie_channel = 1 AND is_foreign = 0",
+                    conn)
 
-            Dim cmd As New SqliteCommand(
-                "SELECT channel_id FROM channels WHERE is_movie_channel = 1 AND is_foreign = 0",
-                conn)
+                Using rdr = cmd.ExecuteReader()
 
-            Using rdr = cmd.ExecuteReader()
+                    While rdr.Read()
+                        channels.Add(rdr.GetString(0))
+                    End While
 
-                While rdr.Read()
-                    channels.Add(rdr.GetString(0))
-                End While
+                End Using
 
             End Using
 
-        End Using
+        End SyncLock
 
         Return channels
 
     End Function
     Function IsOwned(historyDb As String, title As String) As Boolean
+        SyncLock GlobalState.DbLock
+            Using con As New SqliteConnection($"Data Source={historyDb}")
+                con.Open()
 
-        Using con As New SqliteConnection($"Data Source={historyDb}")
-            con.Open()
+                Dim cmd As New SqliteCommand(
+                    "SELECT 1 FROM recording_history WHERE title=@t AND owned=1 LIMIT 1", con)
 
-            Dim cmd As New SqliteCommand(
-                "SELECT 1 FROM recording_history WHERE title=@t AND owned=1 LIMIT 1", con)
+                cmd.Parameters.AddWithValue("@t", title)
 
-            cmd.Parameters.AddWithValue("@t", title)
-
-            Return cmd.ExecuteScalar() IsNot Nothing
-        End Using
-
+                Return cmd.ExecuteScalar() IsNot Nothing
+            End Using
+        End SyncLock
     End Function
 
-    Public Async Function GetXtreamJson(epgUrl As String,
-                                         user As String,
-                                         pass As String,
-                                         userAgent As String) As Task(Of String)
+    Public Function GetXtreamJson(epgUrl As String,
+                             user As String,
+                             pass As String,
+                             userAgent As String) As String
+        Try
+            Dim apiUrl =
+            $"{epgUrl}/player_api.php?username={user}&password={pass}&action=get_live_streams"
 
-        Dim apiUrl =
-            $"{_epgUrl}player_api.php?username={_epgUser}&password={_epgPass}&action=get_live_streams"
-        'http://primestreams.tv:826/player_api.php?username=jFYSJ6UprmRRO&password=Hq0Nl2sZqRGSR9yo&action=get_live_streams
+            Using client As New Net.WebClient()
+                client.Headers.Add("User-Agent", userAgent)
 
-        Dim handler As New HttpClientHandler()
-        handler.AutomaticDecompression =
-            Net.DecompressionMethods.GZip Or Net.DecompressionMethods.Deflate
+                Dim json As String = client.DownloadString(apiUrl)
+                Return json
+            End Using
 
-        Using client As New HttpClient(handler)
+        Catch ex As Exception
+            Logger.Log("Stream API error: " & ex.Message)
+        End Try
 
-            client.DefaultRequestHeaders.Clear()
-            client.DefaultRequestHeaders.Add("User-Agent", userAgent)
-            client.DefaultRequestHeaders.Add("Accept", "*/*")
-
-            Dim response = Await client.GetAsync(apiUrl)
-            response.EnsureSuccessStatusCode()
-
-            Return Await response.Content.ReadAsStringAsync()
-
-        End Using
-
+        Return Nothing
     End Function
     Public Sub UpdateStreamIds(epgUrl As String,
                                 user As String,
                                 pass As String,
                                 streams As List(Of XtreamStream),
                                 moviesDb As String)
+        SyncLock GlobalState.DbLock
+            Using con As New SqliteConnection($"Data Source={moviesDb};Pooling=False;")
+                con.Open()
 
-        Using con As New SqliteConnection($"Data Source={moviesDb};Pooling=False;")
-            con.Open()
+                For Each s In streams
 
-            For Each s In streams
+                    If String.IsNullOrWhiteSpace(s.stream_id) _
+                        OrElse String.IsNullOrWhiteSpace(s.epg_channel_id) Then
+                        Continue For
+                    End If
 
-                If String.IsNullOrWhiteSpace(s.stream_id) _
-                    OrElse String.IsNullOrWhiteSpace(s.epg_channel_id) Then
-                    Continue For
-                End If
-
-                Dim cmd As New SqliteCommand("
+                    Dim cmd As New SqliteCommand("
         UPDATE channels
         SET stream_id=@sid
         WHERE lower(channel_id)=lower(@epg)
         ", con)
 
-                cmd.Parameters.AddWithValue("@sid", s.stream_id)
-                cmd.Parameters.AddWithValue("@epg", s.epg_channel_id)
+                    cmd.Parameters.AddWithValue("@sid", s.stream_id)
+                    cmd.Parameters.AddWithValue("@epg", s.epg_channel_id)
 
-                cmd.ExecuteNonQuery()
+                    cmd.ExecuteNonQuery()
 
-            Next
+                Next
 
-        End Using
-
+            End Using
+        End SyncLock
     End Sub
     Private Function IsHdChannel(channel As String) As Boolean
 
@@ -909,55 +917,35 @@ ON guide(channel, start_utc, normalized_title);
         Console.WriteLine(text)
 
     End Sub
-    Public Sub Log(msg As String)
-
-        Try
-
-            Dim dir = Path.GetDirectoryName(LOG_FILE)
-
-            If Not Directory.Exists(dir) Then
-                Directory.CreateDirectory(dir)
-            End If
-
-            Dim line =
-                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | {msg}"
-
-            File.AppendAllText(LOG_FILE, line & Environment.NewLine)
-
-        Catch
-            ' avoid crashing recorder if logging fails
-        End Try
-
-    End Sub
 
     Public Function MovieExistsInLibrary(title As String) As Boolean
 
         Dim normalized = NormalizeTitle(title)
+        SyncLock GlobalState.DbLock
+            Using con As New SqliteConnection($"Data Source={_DbPath};Pooling=False;")
+                con.Open()
 
-        Using con As New SqliteConnection($"Data Source={_DbPath};Pooling=False;")
-            con.Open()
-
-            Dim sql = "
+                Dim sql = "
             SELECT 1
             FROM master_titles
             WHERE title = @t
             LIMIT 1
         "
 
-            Using cmd As New SqliteCommand(sql, con)
+                Using cmd As New SqliteCommand(sql, con)
 
-                cmd.Parameters.AddWithValue("@t", normalized)
+                    cmd.Parameters.AddWithValue("@t", normalized)
 
-                Dim result = cmd.ExecuteScalar()
+                    Dim result = cmd.ExecuteScalar()
 
-                If result IsNot Nothing Then
-                    Return True
-                End If
+                    If result IsNot Nothing Then
+                        Return True
+                    End If
+
+                End Using
 
             End Using
-
-        End Using
-
+        End SyncLock
         Return False
 
     End Function

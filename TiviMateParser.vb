@@ -27,14 +27,14 @@ Public Class TiviMateParser
 
         Dim results As New List(Of TiviRecording)
 
-        Using con As New SqliteConnection("Data Source=" & tempDb & ";Version=3;")
+        Using con As New SqliteConnection("Data Source=" & tempDb & ";")
 
             con.Open()
 
             ' get table names
             Dim tables As New List(Of String)
 
-            Using cmd As New SQLiteCommand("SELECT name FROM sqlite_master WHERE type='table'", con)
+            Using cmd As New SqliteCommand("SELECT name FROM sqlite_master WHERE type='table'", con)
                 Using r = cmd.ExecuteReader()
                     While r.Read()
                         tables.Add(r.GetString(0))
@@ -51,7 +51,7 @@ Public Class TiviMateParser
                    lower.Contains("timer") OrElse
                    lower.Contains("sched") Then
 
-                    Using cmd As New SQLiteCommand("SELECT * FROM [" & table & "]", con)
+                    Using cmd As New SqliteCommand("SELECT * FROM [" & table & "]", con)
                         Using r = cmd.ExecuteReader()
 
                             While r.Read()

@@ -184,22 +184,22 @@ Public Module GuideCandidateEngine
     Private Function LoadOwnedSet(historyDb As String) As HashSet(Of String)
 
         Dim setOwned As New HashSet(Of String)
+        SyncLock GlobalState.DbLock
+            Using con As New SqliteConnection(ConnStr(historyDb))
+                con.Open()
 
-        Using con As New SqliteConnection(ConnStr(historyDb))
-            con.Open()
+                Dim cmd As New SQLiteCommand(
+                    "SELECT normalized_title FROM recording_history WHERE owned=1", con)
 
-            Dim cmd As New SQLiteCommand(
-                "SELECT normalized_title FROM recording_history WHERE owned=1", con)
-
-            Using r = cmd.ExecuteReader()
-                While r.Read()
-                    If Not IsDBNull(r(0)) Then
-                        setOwned.Add(r(0).ToString())
-                    End If
-                End While
+                Using r = cmd.ExecuteReader()
+                    While r.Read()
+                        If Not IsDBNull(r(0)) Then
+                            setOwned.Add(r(0).ToString())
+                        End If
+                    End While
+                End Using
             End Using
-        End Using
-
+        End SyncLock
         Return setOwned
 
     End Function
@@ -211,25 +211,26 @@ Public Module GuideCandidateEngine
 
         Dim setScheduled As New HashSet(Of String)
 
-        Using con As New SqliteConnection(ConnStr(moviesDb))
-            con.Open()
+        SyncLock GlobalState.DbLock
+            Using con As New SqliteConnection(ConnStr(moviesDb))
+                con.Open()
 
-            Dim cmd As New SQLiteCommand(
-                "SELECT normalized_title, start_time FROM scheduled_recordings", con)
+                Dim cmd As New SQLiteCommand(
+                    "SELECT normalized_title, start_time FROM scheduled_recordings", con)
 
-            Using r = cmd.ExecuteReader()
-                While r.Read()
-                    If Not IsDBNull(r(0)) AndAlso Not IsDBNull(r(1)) Then
-                        Dim key = r(0).ToString() &
-                                  Convert.ToDateTime(r(1)).
-                                  ToUniversalTime().
-                                  ToString("yyyyMMddHHmmss")
-                        setScheduled.Add(key)
-                    End If
-                End While
+                Using r = cmd.ExecuteReader()
+                    While r.Read()
+                        If Not IsDBNull(r(0)) AndAlso Not IsDBNull(r(1)) Then
+                            Dim key = r(0).ToString() &
+                                      Convert.ToDateTime(r(1)).
+                                      ToUniversalTime().
+                                      ToString("yyyyMMddHHmmss")
+                            setScheduled.Add(key)
+                        End If
+                    End While
+                End Using
             End Using
-        End Using
-
+        End SyncLock
         Return setScheduled
 
     End Function

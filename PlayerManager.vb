@@ -34,7 +34,7 @@ Public Module PlayerManager
         '---------------------------------------
         ' Stop any existing stream FIRST
         '---------------------------------------
-        StopStream()
+        'StopStream()
 
         Dim channelName = ""
         Dim title = ""
@@ -52,24 +52,25 @@ WHERE c.nickname = @channel
 AND strftime('%Y%m%d%H%M%S','now','localtime') BETWEEN g.start_utc AND g.end_utc
 LIMIT 1
 "
+        SyncLock GlobalState.DbLock
+            Using con As New SqliteConnection(connectionString)
+                con.Open()
 
-        Using con As New SqliteConnection(connectionString)
-            con.Open()
+                Using cmd As New SqliteCommand(sql, con)
+                    cmd.Parameters.AddWithValue("@channel", channel)
 
-            Using cmd As New SqliteCommand(sql, con)
-                cmd.Parameters.AddWithValue("@channel", channel)
+                    Using reader = cmd.ExecuteReader()
+                        If reader.Read() Then
+                            channelName = reader("nickname").ToString()
+                            title = reader("title").ToString()
 
-                Using reader = cmd.ExecuteReader()
-                    If reader.Read() Then
-                        channelName = reader("nickname").ToString()
-                        title = reader("title").ToString()
-
-                        Dim rawDate As String = reader("start_utc").ToString()
-                        startTime = DateTime.ParseExact(rawDate, "yyyyMMddHHmmss", Nothing)
-                    End If
+                            Dim rawDate As String = reader("start_utc").ToString()
+                            startTime = DateTime.ParseExact(rawDate, "yyyyMMddHHmmss", Nothing)
+                        End If
+                    End Using
                 End Using
             End Using
-        End Using
+        End SyncLock
 
         Dim url = $"{server}/live/{user}/{pass}/{streamId}.m3u8"
 
@@ -96,96 +97,57 @@ LIMIT 1
             _isStartingStream = False
             Exit Sub
         End If
+#Region "VLC Launch (Dual Platform)"
 
-#Region "VLC Launch (Stable Version)"
+        If GlobalState.CurrentTarget = ExecutionTarget.RemoteMac Then
+            ' ============================================================
+            ' MAC → Single Instance (Maximum Stability)
+            ' ============================================================
+            Dim customUA As String = "VLC/3.0" ' Short & Clean
+            Dim psi As New ProcessStartInfo()
+            psi.FileName = "ssh"
 
-        Dim psi As New ProcessStartInfo()
+            ' REMOVED: -n flag (we are reusing the main VLC window now)
+            ' ADDED: --http-reconnect and --http-user-agent
+            ' This is the most reliable "Fire and Forget" string for PrimeStreams.
+            psi.Arguments = $"{GlobalState.MacUser}@{GlobalState.MacHost} open -a VLC --args --http-reconnect --http-user-agent=""{customUA}"" ""{url}"""
 
-        psi.FileName = vlcPath
-        psi.Arguments = """" & url & """ --meta-title=""" & windowTitle & """ --network-caching=1500"
+            psi.UseShellExecute = False
+            psi.CreateNoWindow = True
 
-        psi.UseShellExecute = True
-        psi.CreateNoWindow = False
+            Try
+                Process.Start(psi)
+            Catch ex As Exception
+                ' Handle SSH error
+            End Try
+        Else
 
-        Try
-            Process.Start(psi)
+            ' ================================
+            ' WINDOWS → existing behavior
+            ' ================================
+            If Not IO.File.Exists(vlcPath) Then
+                MsgBox("VLC not found")
+                _isStartingStream = False
+                Exit Sub
+            End If
 
-        Catch ex As Exception
-            MsgBox("ERROR: " & ex.Message)
-        End Try
+            Dim psi As New ProcessStartInfo()
+            psi.FileName = vlcPath
+            psi.Arguments = """" & url & """ --meta-title=""" & windowTitle & """ --network-caching=1500"
+
+            psi.UseShellExecute = True
+            psi.CreateNoWindow = False
+
+            Try
+                vlcProcess = Process.Start(psi)
+            Catch ex As Exception
+                MsgBox("ERROR: " & ex.Message)
+            End Try
+
+        End If
 
 #End Region
 
-
-        GoTo skprt
-        '---------------------------------------
-        ' WINDOW RESIZE (reliable)
-        '---------------------------------------
-        Task.Run(Sub()
-
-                     Try
-                         Dim handle As IntPtr = IntPtr.Zero
-
-                         For i = 1 To 15
-                             Threading.Thread.Sleep(200)
-
-                             Dim p = vlcProcess
-                             If p Is Nothing Then Exit Sub
-
-                             Try
-                                 If p.HasExited Then Exit Sub
-                             Catch
-                                 Exit Sub
-                             End Try
-
-                             Try
-                                 p.Refresh()
-                                 handle = p.MainWindowHandle
-                             Catch
-                                 Exit Sub
-                             End Try
-
-                             If handle <> IntPtr.Zero Then Exit For
-                         Next
-
-                         If handle <> IntPtr.Zero Then
-                             SetWindowPos(handle, IntPtr.Zero, 100, 100, 800, 450, 0)
-                         End If
-
-                     Catch
-                     End Try
-
-                 End Sub)
-        '---------------------------------------
-        ' FAILURE DETECTION (safe)
-        '---------------------------------------
-        Task.Run(Sub()
-
-                     Threading.Thread.Sleep(3000)
-
-                     Dim failed As Boolean = True
-
-                     Try
-                         Dim p = vlcProcess
-
-                         If p IsNot Nothing Then
-                             p.Refresh()
-
-                             If p.MainWindowHandle <> IntPtr.Zero Then
-                                 failed = False
-                             End If
-                         End If
-                     Catch
-                         failed = True
-                     End Try
-
-                     If failed Then
-                         LogStreamError(channel, url, "VLC failed to open stream")
-                         IncrementChannelFailure(channel)
-                     End If
-
-                 End Sub)
-skprt:
         _isStartingStream = False
 
     End Sub
@@ -215,23 +177,23 @@ skprt:
     Private Sub IncrementChannelFailure(channel As String)
 
         Try
+            SyncLock GlobalState.DbLock
+                Using con As New SqliteConnection($"Data Source={_DbPath}")
 
-            Using con As New SqliteConnection($"Data Source={_DbPath}")
+                    con.Open()
 
-                con.Open()
-
-                Dim cmd As New SqliteCommand("
+                    Dim cmd As New SqliteCommand("
 UPDATE channels
 SET failed_count = failed_count + 1
 WHERE nickname = @channel
 ", con)
 
-                cmd.Parameters.AddWithValue("@channel", channel)
+                    cmd.Parameters.AddWithValue("@channel", channel)
 
-                cmd.ExecuteNonQuery()
+                    cmd.ExecuteNonQuery()
 
-            End Using
-
+                End Using
+            End SyncLock
         Catch ex As Exception
 
             LogStreamError(channel, "", "Failed to update failed_count")

@@ -2,6 +2,7 @@
 Imports System.Threading
 Imports Microsoft.Data.Sqlite
 Imports System.Text.RegularExpressions
+Imports System.Net.Http
 
 Public Module Recorder
 
@@ -9,42 +10,63 @@ Public Module Recorder
     Private Const END_PADDING_SECONDS As Integer = 120
 
     Private ReadOnly _recordingLimiter As New SemaphoreSlim(10)
-    Private _activeRecordings As New Dictionary(Of String, Process)
+    Public _activeRecordings As New Dictionary(Of String, Process)
+    Public ReadOnly _lock As New Object()
+    Public pid As Integer
 
-    Public LOG_FILE As String = Path.Combine(_rootPath, "logs", "recordings.log")
+    Public Class RecordingJob
+        Public Property Jobid As String
+        Public Property Title As String
+        Public Property StartTime As DateTime
+    End Class
 
     ' =========================================================
     ' ENTRY POINT
     ' =========================================================
     Public Sub RecordMovie(title As String,
-                           streamId As String,
-                           startTime As DateTime,
-                           endTime As DateTime)
+                       streamId As String,
+                       startTime As DateTime,
+                       endTime As DateTime,
+                       Optional programType As String = "",
+                       Optional seasonNumber As Integer = 0,
+                       Optional episodeNumber As Integer = 0,
+                       Optional episodeTitle As String = "")
 
-        Task.Run(Async Function()
+        _recordingLimiter.Wait()
 
-                     Await _recordingLimiter.WaitAsync()
-
-                     Try
-                         Await RunRecording(title, streamId, startTime, endTime)
-                     Finally
-                         _recordingLimiter.Release()
-                     End Try
-
-                 End Function)
+        Try
+            RunRecording(title, streamId, startTime, endTime, programType, seasonNumber, episodeNumber, episodeTitle)
+        Finally
+            _recordingLimiter.Release()
+        End Try
 
     End Sub
+
+    Public Function GenerateJobId() As String
+        Dim timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss")
+        Dim shortGuid = Guid.NewGuid().ToString("N").Substring(0, 6)
+        Return $"job_{shortGuid}"
+    End Function
 
     ' =========================================================
     ' MAIN PIPELINE
     ' =========================================================
-    Private Async Function RunRecording(title As String,
-                                        streamId As String,
-                                        startTime As DateTime,
-                                        endTime As DateTime) As Task
+    Private Sub RunRecording(title As String,
+                         streamId As String,
+                         startTime As DateTime,
+                         endTime As DateTime,
+                         Optional programType As String = "",
+                         Optional seasonNumber As Integer = 0,
+                         Optional episodeNumber As Integer = 0,
+                         Optional episodeTitle As String = "")
+
+        Dim job As New RecordingJob With {
+            .Jobid = GenerateJobId(),
+            .Title = title,
+            .StartTime = startTime
+        }
 
         Try
-
             If String.IsNullOrWhiteSpace(title) Then
                 title = "Unknown Movie"
             End If
@@ -57,161 +79,252 @@ Public Module Recorder
 
             Dim now = DateTime.Now
             Dim duration = Math.Max((paddedEnd - If(now < paddedStart, paddedStart, now)).TotalSeconds, 0)
+            Dim skipReason As String = Nothing
 
             If duration < 60 Then
-                Log("Skipped → too short")
+                skipReason = "skipped → too short"
+            End If
+
+            If skipReason IsNot Nothing Then
+                Try
+                    UpdateRecordingStatus(job, skipReason)
+                Catch
+                End Try
+                Try
+                    Logger.Log(skipReason, "Recorder", "RunRecording")
+                Catch
+                End Try
                 Return
             End If
 
-            ' WAIT
+            ' WAIT FOR START
             Dim delay = paddedStart - DateTime.Now
             If delay.TotalMilliseconds > 1000 Then
-                Await Task.Delay(delay)
+                Thread.Sleep(delay)
             End If
+
+            ' =========================================================
+            ' 🍎 MAC PIPELINE (REST API)
+            ' =========================================================
+            If GlobalState.CurrentTarget = ExecutionTarget.RemoteMac Then
+                RecordOnMac(streamId, safeName, CInt(duration), startTime,
+                programType, seasonNumber, episodeNumber, episodeTitle)
+                Return
+            End If
+
+            ' =========================================================
+            ' 🪟 WINDOWS PIPELINE
+            ' =========================================================
+            Dim streamUrl = $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.ts"
 
             Directory.CreateDirectory(_recordingDir)
 
             Dim tempTs = Path.Combine(_recordingDir, safeName & ".ts")
             Dim tempMp4 = Path.Combine(_recordingDir, safeName & ".mp4")
 
-            Dim streamUrl = $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.ts"
-
-            ' =========================================================
-            ' RECORD
-            ' =========================================================
-            Dim recordOk = Await RunFFmpegRecord(streamUrl, tempTs, CInt(duration), plexName, startTime)
-
-            If Not recordOk Then
-                FailRecording(title, startTime, "ffmpeg failed")
+            If Not IsStreamValid(streamUrl) Then
+                FailRecording(job, "invalid stream")
                 Return
             End If
 
-            ' =========================================================
-            ' VALIDATE
-            ' =========================================================
+            RunFFmpegRecord(streamUrl, tempTs, CInt(duration), job)
+
             If Not ValidateRecording(tempTs) Then
-                FailRecording(title, startTime, "invalid file")
+                FailRecording(job, "invalid file")
                 SafeDelete(tempTs)
                 Return
             End If
 
-            ' =========================================================
-            ' CONVERT (SMALL FILE)
-            ' =========================================================
-            Dim convertOk = Await ConvertToMp4(tempTs, tempMp4, startTime, plexName)
+            ConvertToMp4(tempTs, tempMp4, job)
 
-            If Not convertOk Then
-                FailRecording(title, startTime, "convert failed")
-                SafeDelete(tempTs)
-                SafeDelete(tempMp4)
-                Return
-            End If
-
-            ' ✅ NEW: Validate MP4 output
             If Not File.Exists(tempMp4) Then
-                FailRecording(title, startTime, "mp4 missing")
-                SafeDelete(tempTs)
+                FailRecording(job, "mp4 missing")
                 Return
             End If
 
             Dim fiMp4 As New FileInfo(tempMp4)
-
-            If fiMp4.Length < 1000000 Then ' 1MB threshold
-                Log("MP4 too small → conversion failed")
-                FailRecording(title, startTime, "mp4 too small")
+            If fiMp4.Length < 1000000 Then
+                FailRecording(job, "mp4 too small")
                 SafeDelete(tempMp4)
-                SafeDelete(tempTs)
                 Return
             End If
 
-            ' =========================================================
-            ' MOVE TO PLEX
-            ' =========================================================
             Dim movieFolder = Path.Combine(_plexMoviesPath, plexName)
             Directory.CreateDirectory(movieFolder)
 
             Dim finalPath = Path.Combine(movieFolder, safeName & ".mp4")
-
             File.Move(tempMp4, finalPath, True)
 
-            Log("COMPLETED → " & finalPath)
-
-            UpdateRecordingStatus(title, startTime, "completed")
+            Logger.Log("COMPLETED → " & finalPath)
+            UpdateRecordingStatus(job, "completed")
 
         Catch ex As Exception
-            Log("ERROR → " & ex.Message)
-            UpdateRecordingStatus(title, startTime, "failed")
+            Logger.Log("ERROR → " & ex.Message)
+            UpdateRecordingStatus(job, "failed")
         End Try
 
-    End Function
+    End Sub
 
     ' =========================================================
-    ' RECORD TS
+    ' 🍎 MAC RECORDING (REST API)
     ' =========================================================
-    Private Async Function RunFFmpegRecord(url As String,
-                                           output As String,
-                                           duration As Integer,
-                                           title As String,
-                                           startTime As DateTime) As Task(Of Boolean)
+    Private Sub RecordOnMac(streamId As String,
+                        title As String,
+                        duration As Integer,
+                        startTime As DateTime,
+                        Optional programType As String = "",
+                        Optional seasonNumber As Integer = 0,
+                        Optional episodeNumber As Integer = 0,
+                        Optional episodeTitle As String = "")
+        Try
+            Dim jobId = GenerateJobId()
+            Dim recJob As New RecordingJob With {
+                .Jobid = jobId,
+                .Title = title,
+                .StartTime = startTime
+            }
 
-        Dim args =
-$"-y -nostdin -loglevel error " &
-$"-user_agent ""{_userAgent}"" " &
-$"-thread_queue_size 1024 " &
-$"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 10 " &
-$"-reconnect_at_eof 1 " &
-$"-fflags +discardcorrupt " &
-$"-err_detect ignore_err " &
-$"-avoid_negative_ts make_zero " &
-$"-i ""{url}"" " &
-$"-t {duration} " &
-$"-c copy " &
-$"-f mpegts " &
-$"""" & output & """"
+            Dim streamUrl = $"{_epgUrl}live/{_epgUser}/{_epgPass}/{streamId}.ts"
 
-        Return Await RunProcess(_ffmpegPath, args, title, startTime, "RECORD")
+            ' Build JSON payload
+            Dim payload = Newtonsoft.Json.JsonConvert.SerializeObject(New With {
+    .job_id = jobId,
+    .title = title,
+    .url = streamUrl,
+    .duration = duration,
+    .start_time = startTime.ToString("s"),
+    .program_type = programType,
+    .season_number = seasonNumber,
+    .episode_number = episodeNumber,
+    .episode_title = episodeTitle
+})
 
-    End Function
+            ' POST to Mac Flask API
+            Using client As New HttpClient()
+                client.Timeout = TimeSpan.FromSeconds(10)
+
+                Dim content = New StringContent(
+                    payload,
+                    System.Text.Encoding.UTF8,
+                    "application/json")
+
+                Dim macApiUrl = $"http://{GlobalState.MacHost}:{GlobalState.MacPort}/record"
+
+                Logger.Log($"POST → {macApiUrl} | {title}", "Recorder", "RecordOnMac")
+
+                Dim response = client.PostAsync(macApiUrl, content).Result
+                Dim responseBody = response.Content.ReadAsStringAsync().Result
+
+                Logger.Log($"MAC RESPONSE → {responseBody}", "Recorder", "RecordOnMac")
+
+                If response.IsSuccessStatusCode Then
+                    UpdateRecordingStatus(recJob, "queued")
+                    Logger.Log($"QUEUED ON MAC → {title}", "Recorder", "RecordOnMac")
+
+                    ' Poll for completion on background thread
+                    Dim pollJob = recJob
+                    Dim t As New Thread(Sub() PollJobStatus(pollJob))
+                    t.IsBackground = True
+                    t.Start()
+
+                Else
+                    Logger.Log($"MAC API ERROR → {response.StatusCode}", "Recorder", "RecordOnMac", "ERROR")
+                    UpdateRecordingStatus(recJob, "failed")
+                End If
+
+            End Using
+
+        Catch ex As Exception
+            Logger.Log($"RecordOnMac EXCEPTION → {ex.Message}", "Recorder", "RecordOnMac", "ERROR")
+        End Try
+    End Sub
 
     ' =========================================================
-    ' CONVERT TO MP4
+    ' POLL MAC FOR JOB COMPLETION
     ' =========================================================
-    Private Async Function ConvertToMp4(inputTs As String,
-                                        outputMp4 As String,
-                                        startTime As DateTime,
-                                        title As String) As Task(Of Boolean)
-        Dim args = ""
-        'Copy (no encoding)
-        args =
-$"-y -fflags +discardcorrupt -err_detect ignore_err " &
-$"-i ""{inputTs}"" " &
-$"-c copy " &
-$"-movflags +faststart " &
-$"""" & outputMp4 & """"
-        GoTo skipOpt
-        args =
-$"-y -fflags +discardcorrupt -err_detect ignore_err " &
-$"-i ""{inputTs}"" " &
-$"-c:v libx264 -preset ultrafast -crf 26 " &
-$"-c:a aac -b:a 128k " &
-$"-movflags +faststart " &
-$"""" & outputMp4 & """"
-skipOpt:
-        Return Await RunProcess(_ffmpegPath, args, title, startTime, "CONVERT")
+    Private Sub PollJobStatus(job As RecordingJob)
+        Try
+            Dim macApiUrl = $"http://{GlobalState.MacHost}:{GlobalState.MacPort}/status/{job.Jobid}"
+            Dim timeout = DateTime.Now.AddHours(4)
 
-    End Function
+            Using client As New HttpClient()
+
+                While DateTime.Now < timeout
+
+                    Thread.Sleep(30000) ' check every 30 seconds
+
+                    Try
+                        Dim response = client.GetAsync(macApiUrl).Result
+                        Dim body = response.Content.ReadAsStringAsync().Result
+                        Dim json = Newtonsoft.Json.Linq.JObject.Parse(body)
+                        Dim statusVal = json("status")?.ToString()
+
+                        Logger.Log($"POLL → {job.Title} | {statusVal}", "Recorder", "PollJobStatus")
+
+                        Select Case statusVal
+                            Case "done"
+                                UpdateRecordingStatus(job, "completed")
+                                Return
+                            Case "failed"
+                                UpdateRecordingStatus(job, "failed")
+                                Return
+                            Case "cancelled"
+                                UpdateRecordingStatus(job, "cancelled")
+                                Return
+                            Case "queued", "recording"
+                                ' Still running, keep polling
+                            Case Else
+                                Logger.Log($"UNKNOWN STATUS → {statusVal}", "Recorder", "PollJobStatus", "WARN")
+                        End Select
+
+                    Catch ex As Exception
+                        Logger.Log($"POLL ERROR → {ex.Message}", "Recorder", "PollJobStatus", "WARN")
+                    End Try
+
+                End While
+
+                ' Timed out after 4 hours
+                Logger.Log($"POLL TIMEOUT → {job.Title}", "Recorder", "PollJobStatus", "ERROR")
+                UpdateRecordingStatus(job, "timeout")
+
+            End Using
+
+        Catch ex As Exception
+            Logger.Log($"PollJobStatus EXCEPTION → {ex.Message}", "Recorder", "PollJobStatus", "ERROR")
+        End Try
+    End Sub
 
     ' =========================================================
-    ' PROCESS RUNNER
+    ' WINDOWS FFMPEG
     ' =========================================================
-    Private Async Function RunProcess(exe As String,
-                                 args As String,
-                                 title As String,
-                                 startTime As DateTime,
-                                 stage As String) As Task(Of Boolean)
+    Private Sub RunFFmpegRecord(url As String,
+                                output As String,
+                                duration As Integer,
+                                job As RecordingJob)
+
+        Dim args = $"-y -loglevel error -i ""{url}"" -t {duration} -c copy -f mpegts ""{output}"""
+        RunProcess(_ffmpegPath, args, job, "RECORD")
+
+    End Sub
+
+    Private Sub ConvertToMp4(inputTs As String,
+                             outputMp4 As String,
+                             job As RecordingJob)
+
+        Dim args = $"-i ""{inputTs}"" -c copy -movflags +faststart ""{outputMp4}"""
+        RunProcess(_ffmpegPath, args, job, "CONVERT")
+
+    End Sub
+
+    ' =========================================================
+    ' PROCESS RUNNER (WINDOWS ONLY)
+    ' =========================================================
+    Private Sub RunProcess(exe As String,
+                           args As String,
+                           job As RecordingJob,
+                           stage As String)
 
         Dim p As New Process()
-
         p.StartInfo.FileName = exe
         p.StartInfo.Arguments = args
         p.StartInfo.UseShellExecute = False
@@ -219,79 +332,88 @@ skipOpt:
         p.StartInfo.RedirectStandardError = True
         p.StartInfo.RedirectStandardOutput = True
 
-        Log($"{stage} START → {title}")
-        Log($"{stage} CMD → {exe} {args}")
+        Logger.Log($"{stage} START → {job.Title}")
 
         p.Start()
-        pid = p.Id
-        UpdateRecordingPID(_DbPath, title, startTime, pid)
-        Dim stderr = Await p.StandardError.ReadToEndAsync()
-        Dim stdout = Await p.StandardOutput.ReadToEndAsync()
 
-        Await p.WaitForExitAsync()
-        ' Recording finished → clear PID
-        UpdateRecordingPID(_DbPath, title, startTime, Nothing)
+        Dim key = $"{job.Title}_{job.StartTime:yyyyMMddHHmm}"
 
-        If Not String.IsNullOrWhiteSpace(stderr) Then
-            Log($"{stage} STDERR → {stderr}")
-        End If
+        SyncLock _activeRecordings
+            _activeRecordings(key) = p
+        End SyncLock
+
+        p.WaitForExit()
+
+        SyncLock _activeRecordings
+            _activeRecordings.Remove(key)
+        End SyncLock
 
         If p.ExitCode <> 0 Then
-            Log($"{stage} FAILED → {title}")
-            Return False
+            Logger.Log($"{stage} FAILED → {job.Title}")
+            UpdateRecordingStatus(job, "failed")
+        Else
+            Logger.Log($"{stage} OK → {job.Title}")
+            UpdateRecordingStatus(job, "complete")
         End If
 
-        Log($"{stage} OK → {title}")
-        Return True
+    End Sub
 
+    ' =========================================================
+    ' HELPERS
+    ' =========================================================
+    Private Function IsStreamValid(url As String) As Boolean
+        Try
+            Dim req = CType(Net.WebRequest.Create(url), Net.HttpWebRequest)
+            req.Method = "HEAD"
+            req.Timeout = 2000
+            Using res = req.GetResponse()
+            End Using
+            Return True
+        Catch
+            Return False
+        End Try
     End Function
-    ' =========================================================
-    ' VALIDATION
-    ' =========================================================
+
     Private Function ValidateRecording(filePath As String) As Boolean
-
         If Not File.Exists(filePath) Then Return False
-
-        Dim fi As New FileInfo(filePath)
-        If fi.Length < 50000000 Then Return False
-
-        Return True
-
+        Return New FileInfo(filePath).Length > 50000000
     End Function
 
-    ' =========================================================
-    ' TITLE CLEANING
-    ' =========================================================
     Private Function NormalizeTitle(title As String) As String
-
-        Dim t = title
-
-        t = t.Replace("HD", "").Replace("SD", "").Replace("FHD", "").Replace("UHD", "")
-
-        t = Regex.Replace(t, "\[.*?\]", "")
-        t = Regex.Replace(t, "\(\d{4}\)", "")
-        t = Regex.Replace(t, "\s+", " ").Trim()
-
-        Return t
-
+        Dim t = Regex.Replace(title, "\(\d{4}\)", "")
+        Return Regex.Replace(t, "\s+", " ").Trim()
     End Function
 
     Private Function BuildPlexName(title As String, startTime As DateTime) As String
+        Dim normalized = NormalizeTitle(title)
+        Dim year As String = Nothing
 
-        Dim cleanTitle = NormalizeTitle(title)
-        Dim year = startTime.Year
+        ' Look up real release year from DB
+        SyncLock GlobalState.DbLock
+            Using con As New SqliteConnection($"Data Source={_DbPath}")
+                con.Open()
+                Dim cmd As New SqliteCommand("
+                SELECT year FROM master_titles
+                WHERE title = @title
+                AND year IS NOT NULL
+                AND year != ''
+                LIMIT 1", con)
+                cmd.Parameters.AddWithValue("@title", normalized)
+                Dim result = cmd.ExecuteScalar()
+                If result IsNot Nothing Then
+                    year = result.ToString()
+                End If
+            End Using
+        End SyncLock
 
-        Return $"{cleanTitle} ({year})"
-
+        ' Fall back to recording year if not found
+        Return $"{normalized} ({If(year, startTime.Year.ToString())})"
     End Function
 
     Private Function CleanFileName(name As String) As String
         Return String.Concat(name.Where(Function(c) Not Path.GetInvalidFileNameChars().Contains(c))).Trim()
     End Function
 
-    ' =========================================================
-    ' HELPERS
-    ' =========================================================
     Private Sub SafeDelete(path As String)
         Try
             If File.Exists(path) Then File.Delete(path)
@@ -299,43 +421,39 @@ skipOpt:
         End Try
     End Sub
 
-    Private Sub FailRecording(title As String, startTime As DateTime, reason As String)
-        Log("FAILED → " & title & " | " & reason)
-        UpdateRecordingStatus(title, startTime, "failed")
+    Private Sub FailRecording(job As RecordingJob, reason As String)
+        Logger.Log("FAILED → " & job.Title & " | " & reason)
+        UpdateRecordingStatus(job, "failed")
     End Sub
 
     ' =========================================================
-    ' DB UPDATE
+    ' DB STATUS UPDATE
     ' =========================================================
-    Public Sub UpdateRecordingStatus(title As String,
-                                     startTime As DateTime,
-                                     status As String)
+    Public Sub UpdateRecordingStatus(job As RecordingJob, status As String)
 
-        Using con As New SqliteConnection($"Data Source={_DbPath}")
-            con.Open()
+        Logger.Log($"STATUS → {status} | {job.Title}", "Recorder", "UpdateRecordingStatus")
 
-            Dim cmd As New SqliteCommand("
-UPDATE scheduled_recordings
-SET status=@status
-WHERE title=@title
-AND start_time=@start
-", con)
+        SyncLock GlobalState.DbLock
+            Using con As New SqliteConnection($"Data Source={_DbPath}")
+                con.Open()
 
-            cmd.Parameters.AddWithValue("@status", status)
-            cmd.Parameters.AddWithValue("@title", title)
-            cmd.Parameters.AddWithValue("@start", startTime)
+                Dim cmd As New SqliteCommand("
+                    UPDATE scheduled_recordings
+                    SET status = @status,
+                        job_id = @jobId
+                    WHERE title = @title
+                    AND start_time = @start
+                ", con)
 
-            cmd.ExecuteNonQuery()
-        End Using
+                cmd.Parameters.AddWithValue("@status", status)
+                cmd.Parameters.AddWithValue("@title", job.Title)
+                cmd.Parameters.AddWithValue("@start", job.StartTime)
+                cmd.Parameters.AddWithValue("@jobId", job.Jobid)
 
-    End Sub
+                cmd.ExecuteNonQuery()
+            End Using
+        End SyncLock
 
-    ' =========================================================
-    ' LOGGING
-    ' =========================================================
-    Private Sub Log(msg As String)
-        File.AppendAllText(LOG_FILE,
-            $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | {msg}" & Environment.NewLine)
     End Sub
 
     ' =========================================================
@@ -347,44 +465,50 @@ AND start_time=@start
         End SyncLock
     End Function
 
-    Public Sub StopAllRecordings()
+    Public Sub StopRecording(title As String, startTime As DateTime)
+
+        Dim key = $"{title}_{startTime:yyyyMMddHHmm}"
+
         SyncLock _activeRecordings
+            If _activeRecordings.ContainsKey(key) Then
+
+                Dim proc = _activeRecordings(key)
+
+                Try
+                    If proc IsNot Nothing AndAlso Not proc.HasExited Then
+                        proc.Kill()
+                        Dim job As New RecordingJob With {
+                            .Jobid = proc.Id.ToString(),
+                            .Title = title,
+                            .StartTime = startTime
+                        }
+                        UpdateRecordingStatus(job, "stopped")
+                    End If
+                Catch
+                End Try
+
+                _activeRecordings.Remove(key)
+            End If
+        End SyncLock
+
+    End Sub
+
+    Public Sub StopAllRecordings()
+
+        SyncLock _activeRecordings
+
             For Each kv In _activeRecordings
                 Try
-                    If Not kv.Value.HasExited Then kv.Value.Kill()
+                    If kv.Value IsNot Nothing AndAlso Not kv.Value.HasExited Then
+                        kv.Value.Kill()
+                    End If
                 Catch
                 End Try
             Next
+
             _activeRecordings.Clear()
+
         End SyncLock
-    End Sub
-    Public Sub UpdateRecordingPID(dbPath As String,
-                              title As String,
-                              startTime As DateTime,
-                              pid As Integer?)
-
-        Using con As New SqliteConnection($"Data Source={dbPath}")
-            con.Open()
-
-            Using cmd As New SqliteCommand("
-UPDATE scheduled_recordings
-SET process_id = @pid
-WHERE title = @title
-AND start_time = @start
-", con)
-                If pid.HasValue Then
-                    cmd.Parameters.AddWithValue("@pid", pid.Value)
-                Else
-                    cmd.Parameters.AddWithValue("@pid", DBNull.Value)
-                End If
-                cmd.Parameters.AddWithValue("@title", title)
-                cmd.Parameters.AddWithValue("@start", startTime)
-
-                cmd.ExecuteNonQuery()
-
-            End Using
-
-        End Using
 
     End Sub
 
