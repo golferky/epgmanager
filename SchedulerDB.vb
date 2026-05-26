@@ -49,8 +49,9 @@ Public Module SchedulerDB
 
     Private Sub EnsureIndex(con As SqliteConnection)
         Using cmd As New SqliteCommand("
+            DROP INDEX IF EXISTS idx_sched_unique;
             CREATE UNIQUE INDEX IF NOT EXISTS idx_sched_unique
-            ON scheduled_recordings(normalized_title, start_time);
+            ON scheduled_recordings(normalized_title, start_time, channel);
         ", con)
             cmd.ExecuteNonQuery()
         End Using
@@ -93,6 +94,40 @@ Public Module SchedulerDB
             Dim result = cmd.ExecuteScalar()
             Return result IsNot Nothing
         End Using
+    End Function
+
+    Public Function LoadActiveScheduleKeys(dbPath As String) As HashSet(Of String)
+        Dim keys As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        SyncLock GlobalState.DbLock
+            Using con As New SqliteConnection($"Data Source={dbPath};Pooling=False;")
+                con.Open()
+                Using cmd As New SqliteCommand("
+                    SELECT normalized_title, start_time
+                    FROM scheduled_recordings
+                    WHERE status IN ('scheduled','queued','recording')", con)
+                    Using rdr = cmd.ExecuteReader()
+                        While rdr.Read()
+                            Dim title = If(IsDBNull(rdr("normalized_title")), "", rdr("normalized_title").ToString())
+                            Dim startTime = If(IsDBNull(rdr("start_time")), "", rdr("start_time").ToString())
+                            If title <> "" AndAlso startTime <> "" Then
+                                keys.Add(MakeScheduleKey(title, startTime))
+                            End If
+                        End While
+                    End Using
+                End Using
+            End Using
+        End SyncLock
+
+        Return keys
+    End Function
+
+    Public Function MakeScheduleKey(title As String, startTime As DateTime) As String
+        Return MakeScheduleKey(NormalizeTitle(title), startTime.ToString("yyyy-MM-dd HH:mm:ss"))
+    End Function
+
+    Private Function MakeScheduleKey(normalizedTitle As String, startTime As String) As String
+        Return normalizedTitle & "|" & startTime
     End Function
 
     Public Function UpcomingRecordingCount(dbPath As String) As Integer

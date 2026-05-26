@@ -32,19 +32,15 @@ Public Module GuideUpdater
             SchedulesDirect.UpdateSDGuide()
 
             Debug.WriteLine("Importing XML guide...")
-            For Each xmlFile In Directory.GetFiles(_guideDir, "*.xml")
-                GuideImporter.ImportXml(xmlFile, localGuideDb)
-            Next
-            Debug.WriteLine("Importing XML guide...")
-            For Each xmlFile In Directory.GetFiles(_guideDir, "*.xml")
-                GuideImporter.ImportXml(xmlFile, localGuideDb)
-            Next
+            GuideImporter.ImportXml(localPath, localGuideDb)
+
+            Debug.WriteLine("Creating guide lookup indexes...")
+            CreateGuideLookupIndexes(localGuideDb)
 
             Debug.WriteLine("Mapping SD to PS channels...")
             MapSDToPSChannels(localGuideDb)
 
-            Debug.WriteLine("Creating guide indexes...")
-            CreateGuideIndexes(localGuideDb)
+            Debug.WriteLine("Guide index rebuild skipped during refresh")
             GuideUpdateDetector.SaveUpdateStamp(_guideDir, stampFile)
             Debug.WriteLine("Guide update complete.")
         Else
@@ -118,6 +114,7 @@ Public Module GuideUpdater
 
     End Sub
     Public Sub MapSDToPSChannels(dbPath As String)
+        Dim rows = 0
         Try
             Debug.WriteLine("Mapping SD guide to PS channels...")
             SyncLock GlobalState.DbLock
@@ -140,12 +137,12 @@ Public Module GuideUpdater
                     AND ps.id IS NULL
                     AND c.stream_id IS NOT NULL
                     AND c.stream_id != 0", con)
-                        Dim rows = cmd.ExecuteNonQuery()
+                        rows = cmd.ExecuteNonQuery()
                         Debug.WriteLine($"SD mapped → {rows} rows inserted to PS channels")
-                        Logger.Log($"SD mapped {rows} rows to PS channels", "GuideUpdater", "MapSDToPSChannels")
                     End Using
                 End Using
             End SyncLock
+            Logger.Log($"SD mapped {rows} rows to PS channels", "GuideUpdater", "MapSDToPSChannels")
         Catch ex As Exception
             Logger.Log("MapSDToPSChannels error: " & ex.Message, "GuideUpdater", "MapSDToPSChannels", "ERROR")
         End Try

@@ -10,8 +10,7 @@ Public Module Logger
                   Optional processId As Integer = 0)
 
         If Monitor.IsEntered(GlobalState.DbLock) Then
-            Debug.WriteLine("⚠️ LOG BLOCKED: " & msg)
-            Debug.WriteLine(Environment.StackTrace)   ' 🔥 ADD THIS
+            Debug.WriteLine("LOG SKIPPED WHILE DB LOCKED: " & msg)
             Return
         End If
 

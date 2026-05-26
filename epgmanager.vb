@@ -433,7 +433,7 @@ Public Module epgmanager
         Dim nowStr As String = DateTime.Now.ToString("yyyyMMddHHmmss")
         Dim upcoming As New List(Of Dictionary(Of String, Object))
         Dim premiums As String() = {"hbo", "sho", "max", "starz", "epix", "mgm", "tmc", "cinemax", "showtime"}
-        Dim exclude As String() = {"newsmax", "shopping", "hsn", "qvc", "latino", "espanol"}
+        Dim exclude As String() = {"newsmax", "shopping", "hsn", "qvc", "latino", "espanol", "paramount"}
 
         For Each xmlPath In Directory.GetFiles(_guideDir, "*.xml")
             Try
@@ -652,6 +652,7 @@ Public Module epgmanager
     target = "RemoteMac",
     ExecutionTarget.RemoteMac,
     ExecutionTarget.LocalWindows)
+                SyncRecordingSettingsToDb()
                 Return True
 
             Catch ex As Exception
@@ -661,6 +662,51 @@ Public Module epgmanager
 
         Catch : Return False : End Try
     End Function
+
+    Private Sub SyncRecordingSettingsToDb()
+        If String.IsNullOrWhiteSpace(_DbPath) Then Return
+        If String.IsNullOrWhiteSpace(_epgUrl) OrElse
+           String.IsNullOrWhiteSpace(_epgUser) OrElse
+           String.IsNullOrWhiteSpace(_epgPass) Then Return
+
+        Try
+            SyncLock GlobalState.DbLock
+                Using con As New SqliteConnection($"Data Source={_DbPath};Pooling=False;")
+                    con.Open()
+                    Using createCmd As New SqliteCommand("
+                        CREATE TABLE IF NOT EXISTS app_settings (
+                            key TEXT PRIMARY KEY,
+                            value TEXT NOT NULL
+                        )", con)
+                        createCmd.ExecuteNonQuery()
+                    End Using
+
+                    Using upsertCmd As New SqliteCommand("
+                        INSERT INTO app_settings (key, value)
+                        VALUES (@key, @value)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value", con)
+                        upsertCmd.Parameters.Add("@key", SqliteType.Text)
+                        upsertCmd.Parameters.Add("@value", SqliteType.Text)
+
+                        upsertCmd.Parameters("@key").Value = "recording_base_url"
+                        upsertCmd.Parameters("@value").Value = _epgUrl
+                        upsertCmd.ExecuteNonQuery()
+
+                        upsertCmd.Parameters("@key").Value = "recording_user"
+                        upsertCmd.Parameters("@value").Value = _epgUser
+                        upsertCmd.ExecuteNonQuery()
+
+                        upsertCmd.Parameters("@key").Value = "recording_pass"
+                        upsertCmd.Parameters("@value").Value = _epgPass
+                        upsertCmd.ExecuteNonQuery()
+                    End Using
+                End Using
+            End SyncLock
+        Catch ex As Exception
+            Debug.WriteLine("SyncRecordingSettingsToDb failed: " & ex.Message)
+        End Try
+    End Sub
+
     Sub RunADB(args As String)
         Dim psi As New ProcessStartInfo(_adbExePath, "-s " & _firestickIp & ":5555 " & args)
         psi.WindowStyle = ProcessWindowStyle.Hidden
@@ -678,8 +724,12 @@ Public Module epgmanager
     End Sub
     Sub RebuildGuideDatabase(dbPath As String)
         SyncLock GlobalState.DbLock
-            Using con As New SqliteConnection($"Data Source={dbPath}")
+            Using con As New SqliteConnection($"Data Source={dbPath};Pooling=False;")
                 con.Open()
+
+                Using cmd As New SqliteCommand("PRAGMA busy_timeout=10000", con)
+                    cmd.ExecuteNonQuery()
+                End Using
 
                 ' Create table if it doesn't exist (won't touch existing data)
                 Dim createSql = "
@@ -706,11 +756,11 @@ Public Module epgmanager
                     ' Column already exists — ignore
                 End Try
 
-                ' Clean up old entries instead of dropping the table
-                Using cmd As New SqliteCommand("
-                DELETE FROM guide
-                WHERE end_utc < datetime('now', 'localtime', '-7 days')", con)
-                    cmd.ExecuteNonQuery()
+                Using cmd As New SqliteCommand("SELECT COUNT(1) FROM guide", con)
+                    Dim guideRows = CLng(cmd.ExecuteScalar())
+                    Debug.WriteLine($"SD → guide rows before cleanup: {guideRows}")
+
+                    Debug.WriteLine("SD → guide cleanup skipped during refresh")
                 End Using
 
                 Debug.WriteLine("SD → Guide database rebuilt (history preserved)")
@@ -722,23 +772,8 @@ Public Module epgmanager
 
         SyncLock GlobalState.DbLock
 
-            Using con As New SqliteConnection($"Data Source={dbPath}")
+            Using con As New SqliteConnection($"Data Source={dbPath};Pooling=False;")
                 con.Open()
-
-                ' Remove duplicates before creating unique index
-                Dim cleanupSql =
-        "
-DELETE FROM guide
-WHERE rowid NOT IN (
-    SELECT MIN(rowid)
-    FROM guide
-    GROUP BY channel, start_utc, normalized_title
-);
-"
-
-                Using cleanup As New SqliteCommand(cleanupSql, con)
-                    cleanup.ExecuteNonQuery()
-                End Using
 
                 Dim sql =
         "
@@ -753,13 +788,59 @@ ON guide(channel, start_utc);
 CREATE INDEX IF NOT EXISTS idx_guide_title_start
 ON guide(normalized_title, start_utc);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_guide_unique
+CREATE INDEX IF NOT EXISTS idx_guide_unique
 ON guide(channel, start_utc, normalized_title);
 "
                 Using cmd As New SqliteCommand(sql, con)
                     cmd.ExecuteNonQuery()
                 End Using
 
+            End Using
+        End SyncLock
+
+    End Sub
+
+    Sub DropGuideIndexesForImport(dbPath As String)
+
+        SyncLock GlobalState.DbLock
+
+            Using con As New SqliteConnection($"Data Source={dbPath};Pooling=False;")
+                con.Open()
+
+                Dim sql =
+        "
+DROP INDEX IF EXISTS idx_guide_start;
+DROP INDEX IF EXISTS idx_guide_start_cover;
+DROP INDEX IF EXISTS idx_guide_channel_start;
+DROP INDEX IF EXISTS idx_guide_title_start;
+DROP INDEX IF EXISTS idx_guide_unique;
+"
+                Using cmd As New SqliteCommand(sql, con)
+                    cmd.ExecuteNonQuery()
+                End Using
+            End Using
+        End SyncLock
+
+    End Sub
+
+    Sub CreateGuideLookupIndexes(dbPath As String)
+
+        SyncLock GlobalState.DbLock
+
+            Using con As New SqliteConnection($"Data Source={dbPath};Pooling=False;")
+                con.Open()
+
+                Dim sql =
+        "
+CREATE INDEX IF NOT EXISTS idx_guide_channel_start
+ON guide(channel, start_utc);
+
+CREATE INDEX IF NOT EXISTS idx_guide_xml_channel_start
+ON guide(xml_file, channel, start_utc);
+"
+                Using cmd As New SqliteCommand(sql, con)
+                    cmd.ExecuteNonQuery()
+                End Using
             End Using
         End SyncLock
 

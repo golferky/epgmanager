@@ -107,7 +107,7 @@ Public Module Recorder
             ' 🍎 MAC PIPELINE (REST API)
             ' =========================================================
             If GlobalState.CurrentTarget = ExecutionTarget.RemoteMac Then
-                RecordOnMac(streamId, safeName, CInt(duration), startTime,
+                RecordOnMac(streamId, title, safeName, CInt(duration), startTime,
                 programType, seasonNumber, episodeNumber, episodeTitle)
                 Return
             End If
@@ -169,7 +169,8 @@ Public Module Recorder
     ' 🍎 MAC RECORDING (REST API)
     ' =========================================================
     Private Sub RecordOnMac(streamId As String,
-                        title As String,
+                        scheduledTitle As String,
+                        recordingTitle As String,
                         duration As Integer,
                         startTime As DateTime,
                         Optional programType As String = "",
@@ -180,7 +181,7 @@ Public Module Recorder
             Dim jobId = GenerateJobId()
             Dim recJob As New RecordingJob With {
                 .Jobid = jobId,
-                .Title = title,
+                .Title = scheduledTitle,
                 .StartTime = startTime
             }
 
@@ -189,7 +190,7 @@ Public Module Recorder
             ' Build JSON payload
             Dim payload = Newtonsoft.Json.JsonConvert.SerializeObject(New With {
     .job_id = jobId,
-    .title = title,
+    .title = recordingTitle,
     .url = streamUrl,
     .duration = duration,
     .start_time = startTime.ToString("s"),
@@ -210,7 +211,7 @@ Public Module Recorder
 
                 Dim macApiUrl = $"http://{GlobalState.MacHost}:{GlobalState.MacPort}/record"
 
-                Logger.Log($"POST → {macApiUrl} | {title}", "Recorder", "RecordOnMac")
+                Logger.Log($"POST → {macApiUrl} | {recordingTitle}", "Recorder", "RecordOnMac")
 
                 Dim response = client.PostAsync(macApiUrl, content).Result
                 Dim responseBody = response.Content.ReadAsStringAsync().Result
@@ -219,7 +220,7 @@ Public Module Recorder
 
                 If response.IsSuccessStatusCode Then
                     UpdateRecordingStatus(recJob, "queued")
-                    Logger.Log($"QUEUED ON MAC → {title}", "Recorder", "RecordOnMac")
+                    Logger.Log($"QUEUED ON MAC → {recordingTitle}", "Recorder", "RecordOnMac")
 
                     ' Poll for completion on background thread
                     Dim pollJob = recJob

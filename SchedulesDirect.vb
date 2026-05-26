@@ -7,7 +7,7 @@ Imports System.Security.Cryptography
 Public Module SchedulesDirect
 
     Private Const SD_BASE_URL As String = "https://json.schedulesdirect.org/20141201"
-    Private Const SD_LINEUP As String = "USA-DITV515-X"
+    Private Const DEFAULT_SD_LINEUP As String = "USA-DITV515-X"
 
     Public _sdUser As String = ""
     Public _sdPass As String = ""
@@ -25,16 +25,8 @@ Public Module SchedulesDirect
         Debug.WriteLine("SD → UpdateSDGuide called")
         Debug.WriteLine("SD → DbPath = " & _DbPath)
 
-        If IO.File.Exists(MY_CONFIG) Then
-            Dim json = IO.File.ReadAllText(MY_CONFIG)
-            Using doc = JsonDocument.Parse(json)
-                Dim root = doc.RootElement
-                Dim userProp As JsonElement
-                Dim passProp As JsonElement
-                If root.TryGetProperty("SD_USER", userProp) Then _sdUser = userProp.GetString()
-                If root.TryGetProperty("SD_PASS", passProp) Then _sdPass = passProp.GetString()
-            End Using
-        End If
+        Dim lineups = LoadSdConfig()
+        Debug.WriteLine("SD → Lineups: " & String.Join(", ", lineups))
 
         If Not Authenticate() Then
             Debug.WriteLine("SD → Auth failed")
@@ -43,19 +35,45 @@ Public Module SchedulesDirect
         End If
         Debug.WriteLine($"SD → Auth done ({sw.Elapsed.TotalSeconds:F1}s)")
 
-        Dim channels = GetLineupChannels()
-        Debug.WriteLine($"SD → Channels: {channels.Count} ({sw.Elapsed.TotalSeconds:F1}s)")
+        Dim stationNames As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+        Dim channels = GetLineupChannels(lineups, stationNames)
+        Debug.WriteLine($"SD → Channels: {channels.Count} from {lineups.Count} lineup(s) ({sw.Elapsed.TotalSeconds:F1}s)")
         If channels Is Nothing OrElse channels.Count = 0 Then
             Logger.Log("SD no channels returned", "SchedulesDirect", "UpdateSDGuide", "WARN")
             Return
         End If
 
-        SyncStationsToChannels(channels)
+        SyncStationsToChannels(channels, stationNames)
 
         Dim schedules = GetSchedules(channels.Keys.ToList())
         Debug.WriteLine($"SD → Schedules: {schedules.Count} ({sw.Elapsed.TotalSeconds:F1}s)")
         If schedules Is Nothing OrElse schedules.Count = 0 Then
             Logger.Log("SD no schedules returned", "SchedulesDirect", "UpdateSDGuide", "WARN")
+            Return
+        End If
+
+        Dim cutoff = GetIncrementalScheduleCutoff()
+        If cutoff.HasValue Then
+            Dim originalCount = schedules.Count
+            schedules = schedules.
+                Where(Function(s) s.AirDateTime >= cutoff.Value).
+                ToList()
+
+            Debug.WriteLine($"SD → Incremental cutoff: {cutoff.Value:yyyy-MM-dd HH:mm:ss} ({schedules.Count}/{originalCount} schedules kept)")
+
+            If schedules.Count = 0 Then
+                Debug.WriteLine("SD → No new schedules to import")
+                Logger.Log("SD guide update complete; no new schedules", "SchedulesDirect", "UpdateSDGuide")
+                Return
+            End If
+        Else
+            Debug.WriteLine("SD → No existing SD guide rows; full import")
+        End If
+
+        schedules = FilterExistingGuideSchedules(schedules)
+        If schedules.Count = 0 Then
+            Debug.WriteLine("SD → No missing schedules to import")
+            Logger.Log("SD guide update complete; no missing schedules", "SchedulesDirect", "UpdateSDGuide")
             Return
         End If
 
@@ -71,6 +89,104 @@ Public Module SchedulesDirect
 
         Logger.Log($"SD guide update complete in {sw.Elapsed.TotalMinutes:F1} mins", "SchedulesDirect", "UpdateSDGuide")
     End Sub
+
+    Private Function LoadSdConfig() As List(Of String)
+        Dim lineups As New List(Of String)
+
+        If IO.File.Exists(MY_CONFIG) Then
+            Dim json = IO.File.ReadAllText(MY_CONFIG)
+            Using doc = JsonDocument.Parse(json)
+                Dim root = doc.RootElement
+                Dim userProp As JsonElement
+                Dim passProp As JsonElement
+                If root.TryGetProperty("SD_USER", userProp) Then _sdUser = userProp.GetString()
+                If root.TryGetProperty("SD_PASS", passProp) Then _sdPass = passProp.GetString()
+
+                Dim lineupsProp As JsonElement
+                If root.TryGetProperty("SD_LINEUPS", lineupsProp) Then
+                    If lineupsProp.ValueKind = JsonValueKind.Array Then
+                        For Each item In lineupsProp.EnumerateArray()
+                            If item.ValueKind = JsonValueKind.String AndAlso Not String.IsNullOrWhiteSpace(item.GetString()) Then
+                                lineups.Add(item.GetString().Trim())
+                            End If
+                        Next
+                    ElseIf lineupsProp.ValueKind = JsonValueKind.String Then
+                        For Each lineup In lineupsProp.GetString().Split(","c)
+                            If Not String.IsNullOrWhiteSpace(lineup) Then lineups.Add(lineup.Trim())
+                        Next
+                    End If
+                End If
+
+                Dim lineupProp As JsonElement
+                If lineups.Count = 0 AndAlso root.TryGetProperty("SD_LINEUP", lineupProp) AndAlso
+                   lineupProp.ValueKind = JsonValueKind.String AndAlso
+                   Not String.IsNullOrWhiteSpace(lineupProp.GetString()) Then
+                    lineups.Add(lineupProp.GetString().Trim())
+                End If
+            End Using
+        End If
+
+        If lineups.Count = 0 Then lineups.Add(DEFAULT_SD_LINEUP)
+
+        Return lineups.Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+    End Function
+
+    Private Function GetIncrementalScheduleCutoff() As DateTime?
+        Try
+            SyncLock GlobalState.DbLock
+                Using con As New SqliteConnection($"Data Source={_DbPath};Pooling=False;")
+                    con.Open()
+
+                    Using cmd As New SqliteCommand("
+                        SELECT MAX(start_utc)
+                        FROM guide
+                        WHERE xml_file = 'schedules_direct'", con)
+                        Dim value = cmd.ExecuteScalar()
+                        If value Is Nothing OrElse value Is DBNull.Value Then Return Nothing
+
+                        Dim latest As DateTime
+                        If DateTime.TryParse(CStr(value), latest) Then
+                            Return latest.AddHours(-12)
+                        End If
+                    End Using
+                End Using
+            End SyncLock
+        Catch ex As Exception
+            Logger.Log("SD incremental cutoff error: " & ex.Message, "SchedulesDirect", "GetIncrementalScheduleCutoff", "WARN")
+        End Try
+
+        Return Nothing
+    End Function
+
+    Private Function FilterExistingGuideSchedules(schedules As List(Of SDScheduleEntry)) As List(Of SDScheduleEntry)
+        Try
+            SyncLock GlobalState.DbLock
+                Using con As New SqliteConnection($"Data Source={_DbPath};Pooling=False;")
+                    con.Open()
+
+                    Dim existingGuideKeys As New HashSet(Of String)(StringComparer.Ordinal)
+                    Using cmd As New SqliteCommand("SELECT channel, start_utc FROM guide", con)
+                        Using rdr = cmd.ExecuteReader()
+                            While rdr.Read()
+                                existingGuideKeys.Add(CStr(rdr("channel")) & vbTab & CStr(rdr("start_utc")))
+                            End While
+                        End Using
+                    End Using
+
+                    Dim missing = schedules.
+                        Where(Function(s) Not existingGuideKeys.Contains("sd." & s.StationId & vbTab & s.AirDateTime.ToString("yyyy-MM-dd HH:mm:ss"))).
+                        ToList()
+
+                    Debug.WriteLine($"SD → Missing guide schedules: {missing.Count}/{schedules.Count}")
+                    Return missing
+                End Using
+            End SyncLock
+        Catch ex As Exception
+            Logger.Log("SD existing-guide filter error: " & ex.Message, "SchedulesDirect", "FilterExistingGuideSchedules", "WARN")
+        End Try
+
+        Return schedules
+    End Function
 
     ' =========================================================
     ' AUTHENTICATE
@@ -112,31 +228,45 @@ Public Module SchedulesDirect
     ' =========================================================
     ' GET LINEUP CHANNELS
     ' =========================================================
-    Private Function GetLineupChannels() As Dictionary(Of String, String)
-        Dim result As New Dictionary(Of String, String)
+    Private Function GetLineupChannels(lineups As List(Of String),
+                                       stationNames As Dictionary(Of String, String)) As Dictionary(Of String, String)
+        Dim result As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
 
         Try
             Using client As New HttpClient()
                 client.DefaultRequestHeaders.Add("User-Agent", "EPGManager/1.0")
                 client.DefaultRequestHeaders.Add("token", _sdToken)
-                Dim response = client.GetAsync($"{SD_BASE_URL}/lineups/{SD_LINEUP}").Result
-                Dim body = response.Content.ReadAsStringAsync().Result
-                Debug.WriteLine("SD → Lineup response: " & body.Substring(0, Math.Min(300, body.Length)))
-                Dim doc = JsonDocument.Parse(body)
 
-                Dim rootProp As JsonElement
-                If doc.RootElement.TryGetProperty("response", rootProp) Then
-                    Debug.WriteLine("SD → Lineup error: " & rootProp.GetString())
-                    Return result
-                End If
+                For Each lineup In lineups
+                    Dim response = client.GetAsync($"{SD_BASE_URL}/lineups/{lineup}").Result
+                    Dim body = response.Content.ReadAsStringAsync().Result
+                    Debug.WriteLine($"SD → Lineup {lineup} response: " & body.Substring(0, Math.Min(300, body.Length)))
+                    Dim doc = JsonDocument.Parse(body)
 
-                For Each mapping In doc.RootElement.GetProperty("map").EnumerateArray()
-                    Dim stationId = mapping.GetProperty("stationID").GetString()
-                    Dim chanProp As JsonElement
-                    Dim channel = If(mapping.TryGetProperty("channel", chanProp), chanProp.GetString(), "")
-                    If Not result.ContainsKey(stationId) Then
-                        result.Add(stationId, channel)
+                    Dim rootProp As JsonElement
+                    If doc.RootElement.TryGetProperty("response", rootProp) Then
+                        Debug.WriteLine($"SD → Lineup {lineup} error: " & rootProp.GetString())
+                        Continue For
                     End If
+
+                    Dim stationsProp As JsonElement
+                    If doc.RootElement.TryGetProperty("stations", stationsProp) Then
+                        For Each station In stationsProp.EnumerateArray()
+                            Dim stationId = station.GetProperty("stationID").GetString()
+                            Dim nameProp As JsonElement
+                            Dim name = If(station.TryGetProperty("name", nameProp), nameProp.GetString(), stationId)
+                            If Not stationNames.ContainsKey(stationId) Then stationNames(stationId) = name
+                        Next
+                    End If
+
+                    For Each mapping In doc.RootElement.GetProperty("map").EnumerateArray()
+                        Dim stationId = mapping.GetProperty("stationID").GetString()
+                        Dim chanProp As JsonElement
+                        Dim channel = If(mapping.TryGetProperty("channel", chanProp), chanProp.GetString(), "")
+                        If Not result.ContainsKey(stationId) Then
+                            result.Add(stationId, channel)
+                        End If
+                    Next
                 Next
             End Using
 
@@ -150,52 +280,34 @@ Public Module SchedulesDirect
     ' =========================================================
     ' SYNC STATIONS TO CHANNELS TABLE
     ' =========================================================
-    Private Sub SyncStationsToChannels(channels As Dictionary(Of String, String))
+    Private Sub SyncStationsToChannels(channels As Dictionary(Of String, String),
+                                       stationNames As Dictionary(Of String, String))
         Try
-            Using client As New HttpClient()
-                client.DefaultRequestHeaders.Add("User-Agent", "EPGManager/1.0")
-                client.DefaultRequestHeaders.Add("token", _sdToken)
-                Dim response = client.GetAsync($"{SD_BASE_URL}/lineups/{SD_LINEUP}").Result
-                Dim body = response.Content.ReadAsStringAsync().Result
-                Dim doc = JsonDocument.Parse(body)
-
-                Dim stationNames As New Dictionary(Of String, String)
-                Dim stationsProp As JsonElement
-                If doc.RootElement.TryGetProperty("stations", stationsProp) Then
-                    For Each station In stationsProp.EnumerateArray()
-                        Dim stationId = station.GetProperty("stationID").GetString()
-                        Dim nameProp As JsonElement
-                        Dim name = If(station.TryGetProperty("name", nameProp), nameProp.GetString(), stationId)
-                        stationNames(stationId) = name
-                    Next
-                End If
-
-                SyncLock GlobalState.DbLock
-                    Using con As New SqliteConnection($"Data Source={_DbPath}")
-                        con.Open()
-                        Using trans = con.BeginTransaction()
-                            Dim cmd As New SqliteCommand("
+            SyncLock GlobalState.DbLock
+                Using con As New SqliteConnection($"Data Source={_DbPath}")
+                    con.Open()
+                    Using trans = con.BeginTransaction()
+                        Dim cmd As New SqliteCommand("
                                 INSERT OR IGNORE INTO channels
                                     (channel_id, nickname, guide_channel, type, favorite, is_movie_channel)
                                 VALUES
                                     (@id, @name, @id, 'sd', 0, 0)", con)
-                            cmd.Parameters.Add("@id", SqliteType.Text)
-                            cmd.Parameters.Add("@name", SqliteType.Text)
-                            cmd.Transaction = trans
+                        cmd.Parameters.Add("@id", SqliteType.Text)
+                        cmd.Parameters.Add("@name", SqliteType.Text)
+                        cmd.Transaction = trans
 
-                            For Each kvp In channels
-                                Dim channelId = "sd." & kvp.Key
-                                Dim name = If(stationNames.ContainsKey(kvp.Key), stationNames(kvp.Key), channelId)
-                                cmd.Parameters("@id").Value = channelId
-                                cmd.Parameters("@name").Value = name
-                                cmd.ExecuteNonQuery()
-                            Next
+                        For Each kvp In channels
+                            Dim channelId = "sd." & kvp.Key
+                            Dim name = If(stationNames.ContainsKey(kvp.Key), stationNames(kvp.Key), channelId)
+                            cmd.Parameters("@id").Value = channelId
+                            cmd.Parameters("@name").Value = name
+                            cmd.ExecuteNonQuery()
+                        Next
 
-                            trans.Commit()
-                        End Using
+                        trans.Commit()
                     End Using
-                End SyncLock
-            End Using
+                End Using
+            End SyncLock
 
             Debug.WriteLine("SD → Stations synced to channels table")
 
@@ -460,28 +572,53 @@ Public Module SchedulesDirect
         Dim matched = 0
 
         SyncLock GlobalState.DbLock
-            Using con As New SqliteConnection($"Data Source={_DbPath}")
+            Using con As New SqliteConnection($"Data Source={_DbPath};Pooling=False;")
                 con.Open()
 
-                Dim checkCmd As New SqliteCommand("
-                    SELECT 1 FROM guide
-                    WHERE channel = @ch
-                    AND start_utc = @st
-                    LIMIT 1", con)
-                checkCmd.Parameters.Add("@ch", SqliteType.Text)
-                checkCmd.Parameters.Add("@st", SqliteType.Text)
+                Using pragma As New SqliteCommand("PRAGMA busy_timeout=10000", con)
+                    pragma.ExecuteNonQuery()
+                End Using
 
-                Dim lookupCmd As New SqliteCommand("
-    SELECT id FROM master_titles
-    WHERE normalized_title = @norm
-    AND (@myear IS NULL OR CAST(year AS TEXT) = @myear)
-    LIMIT 1", con)
-                lookupCmd.Parameters.Add("@norm", SqliteType.Text)
-                lookupCmd.Parameters.Add("@myear", SqliteType.Text)
+                Debug.WriteLine("SD → loading existing guide keys...")
+                Dim existingGuideKeys As New HashSet(Of String)(StringComparer.Ordinal)
+                Using cmd As New SqliteCommand("SELECT channel, start_utc FROM guide", con)
+                    Using rdr = cmd.ExecuteReader()
+                        While rdr.Read()
+                            existingGuideKeys.Add(CStr(rdr("channel")) & vbTab & CStr(rdr("start_utc")))
+                        End While
+                    End Using
+                End Using
+                Debug.WriteLine($"SD → existing guide keys loaded: {existingGuideKeys.Count}")
+
+                Debug.WriteLine("SD → loading master title lookup...")
+                Dim masterByNorm As New Dictionary(Of String, Integer)(StringComparer.Ordinal)
+                Dim masterByNormYear As New Dictionary(Of String, Integer)(StringComparer.Ordinal)
+                Using cmd As New SqliteCommand("SELECT id, normalized_title, year FROM master_titles", con)
+                    Using rdr = cmd.ExecuteReader()
+                        While rdr.Read()
+                            If IsDBNull(rdr("normalized_title")) Then Continue While
+
+                            Dim norm = CStr(rdr("normalized_title"))
+                            Dim id = CInt(rdr("id"))
+
+                            If Not masterByNorm.ContainsKey(norm) Then
+                                masterByNorm(norm) = id
+                            End If
+
+                            If Not IsDBNull(rdr("year")) Then
+                                Dim yearKey = norm & vbTab & CStr(rdr("year"))
+                                If Not masterByNormYear.ContainsKey(yearKey) Then
+                                    masterByNormYear(yearKey) = id
+                                End If
+                            End If
+                        End While
+                    End Using
+                End Using
+                Debug.WriteLine($"SD → master title lookup loaded: {masterByNorm.Count}")
 
 
                 Dim insCmd As New SqliteCommand("
-                    INSERT INTO guide
+                    INSERT OR IGNORE INTO guide
                         (title, normalized_title, channel, start_utc, end_utc, xml_file,
                          master_title_id, program_type, season_number, episode_number,
                          episode_title, year)
@@ -501,11 +638,14 @@ Public Module SchedulesDirect
                 insCmd.Parameters.Add("@year", SqliteType.Integer)
 
                 Using trans = con.BeginTransaction()
-                    checkCmd.Transaction = trans
-                    lookupCmd.Transaction = trans
                     insCmd.Transaction = trans
 
                     For Each s In schedules
+                        Dim processed = inserted + skipped
+                        If processed > 0 AndAlso processed Mod 10000 = 0 Then
+                            Debug.WriteLine($"SD → InsertToGuide progress: {processed}/{schedules.Count} rows")
+                        End If
+
                         If Not programs.ContainsKey(s.ProgramId) Then
                             skipped += 1
                             Continue For
@@ -521,23 +661,23 @@ Public Module SchedulesDirect
                         Dim endStr = s.AirDateTime.AddSeconds(s.Duration).ToString("yyyy-MM-dd HH:mm:ss")
                         Dim channelId = "sd." & s.StationId
                         Dim normTitle = NormalizeTitle(p.Title)
+                        Dim guideKey = channelId & vbTab & startStr
 
-                        checkCmd.Parameters("@ch").Value = channelId
-                        checkCmd.Parameters("@st").Value = startStr
-                        If checkCmd.ExecuteScalar() IsNot Nothing Then
+                        If existingGuideKeys.Contains(guideKey) Then
                             skipped += 1
                             Continue For
                         End If
 
-                        lookupCmd.Parameters("@norm").Value = normTitle
-                        lookupCmd.Parameters("@myear").Value = If(String.IsNullOrEmpty(p.MovieYear),
-                                          CObj(DBNull.Value),
-                                          CObj(p.MovieYear))
-                        Dim masterIdObj = lookupCmd.ExecuteScalar()
-                        Dim masterId As Object = If(masterIdObj IsNot Nothing,
-                                                    CObj(CInt(masterIdObj)),
-                                                    CObj(DBNull.Value))
-                        If masterIdObj IsNot Nothing Then matched += 1
+                        Dim masterId As Object = DBNull.Value
+                        Dim cachedMasterId As Integer
+                        If Not String.IsNullOrEmpty(p.MovieYear) AndAlso
+                           masterByNormYear.TryGetValue(normTitle & vbTab & p.MovieYear, cachedMasterId) Then
+                            masterId = cachedMasterId
+                            matched += 1
+                        ElseIf masterByNorm.TryGetValue(normTitle, cachedMasterId) Then
+                            masterId = cachedMasterId
+                            matched += 1
+                        End If
 
                         insCmd.Parameters("@title").Value = p.Title
                         insCmd.Parameters("@norm").Value = normTitle
@@ -561,8 +701,12 @@ Public Module SchedulesDirect
                                                               CObj(DBNull.Value),
                                                               CObj(CInt(p.MovieYear)))
 
-                        insCmd.ExecuteNonQuery()
-                        inserted += 1
+                        If insCmd.ExecuteNonQuery() > 0 Then
+                            inserted += 1
+                            existingGuideKeys.Add(guideKey)
+                        Else
+                            skipped += 1
+                        End If
                     Next
 
                     trans.Commit()

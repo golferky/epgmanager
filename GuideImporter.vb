@@ -6,6 +6,23 @@ Imports System.IO
 Imports System.Xml
 Public Module GuideImporter
 
+    Private Class SdGuideInfo
+        Public Property StartTime As DateTime
+        Public Property ProgramType As Object
+        Public Property SeasonNumber As Object
+        Public Property EpisodeNumber As Object
+        Public Property EpisodeTitle As Object
+    End Class
+
+    Private Class XmlGuideEntry
+        Public Property Title As String
+        Public Property NormalizedTitle As String
+        Public Property Channel As String
+        Public Property StartUtc As String
+        Public Property EndUtc As String
+        Public Property StartTime As DateTime
+    End Class
+
     Private Function Norm(t As String) As String
         If String.IsNullOrWhiteSpace(t) Then Return ""
         t = t.ToLowerInvariant()
@@ -25,6 +42,65 @@ Public Module GuideImporter
             ", con)
                     pragma.ExecuteNonQuery()
                 End Using
+
+                Dim entries = LoadXmlEntries(xmlFile)
+                Debug.WriteLine($"XML → parsed {entries.Count} programmes from {Path.GetFileName(xmlFile)}")
+
+                If entries.Count = 0 Then
+                    Debug.WriteLine($"XML → ImportXml complete: {Path.GetFileName(xmlFile)} | Inserted: 0 | Skipped: 0")
+                    Return
+                End If
+
+                Dim minStart = entries.Min(Function(e) e.StartTime).ToString("yyyy-MM-dd HH:mm:ss")
+                Dim maxStart = entries.Max(Function(e) e.StartTime).ToString("yyyy-MM-dd HH:mm:ss")
+
+                Debug.WriteLine($"XML → loading existing guide keys for {minStart} through {maxStart}...")
+                Dim existingGuideKeys As New HashSet(Of String)(StringComparer.Ordinal)
+                Using keyCmd As New SqliteCommand("
+                    SELECT channel, start_utc
+                    FROM guide
+                    WHERE start_utc BETWEEN @minStart AND @maxStart", con)
+                    keyCmd.Parameters.AddWithValue("@minStart", minStart)
+                    keyCmd.Parameters.AddWithValue("@maxStart", maxStart)
+                    Using rdr = keyCmd.ExecuteReader()
+                        While rdr.Read()
+                            existingGuideKeys.Add(CStr(rdr("channel")) & vbTab & CStr(rdr("start_utc")))
+                        End While
+                    End Using
+                End Using
+                Debug.WriteLine($"XML → existing guide keys loaded: {existingGuideKeys.Count}")
+
+                Debug.WriteLine("XML → loading SD episode lookup...")
+                Dim sdLookup As New Dictionary(Of String, List(Of SdGuideInfo))(StringComparer.Ordinal)
+                Using sdLoadCmd As New SqliteCommand("
+                    SELECT normalized_title, start_utc, program_type, season_number, episode_number, episode_title
+                    FROM guide
+                    WHERE xml_file = 'schedules_direct'", con)
+                    Using rdr = sdLoadCmd.ExecuteReader()
+                        While rdr.Read()
+                            If IsDBNull(rdr("normalized_title")) OrElse IsDBNull(rdr("start_utc")) Then Continue While
+
+                            Dim startTime As DateTime
+                            If Not DateTime.TryParse(CStr(rdr("start_utc")), startTime) Then Continue While
+
+                            Dim normalized = CStr(rdr("normalized_title"))
+                            Dim items As List(Of SdGuideInfo) = Nothing
+                            If Not sdLookup.TryGetValue(normalized, items) Then
+                                items = New List(Of SdGuideInfo)
+                                sdLookup(normalized) = items
+                            End If
+
+                            items.Add(New SdGuideInfo With {
+                                .StartTime = startTime,
+                                .ProgramType = If(IsDBNull(rdr("program_type")), CObj(DBNull.Value), rdr("program_type")),
+                                .SeasonNumber = If(IsDBNull(rdr("season_number")), CObj(DBNull.Value), rdr("season_number")),
+                                .EpisodeNumber = If(IsDBNull(rdr("episode_number")), CObj(DBNull.Value), rdr("episode_number")),
+                                .EpisodeTitle = If(IsDBNull(rdr("episode_title")), CObj(DBNull.Value), rdr("episode_title"))
+                            })
+                        End While
+                    End Using
+                End Using
+                Debug.WriteLine($"XML → SD episode lookup loaded: {sdLookup.Count}")
 
                 Using trans = con.BeginTransaction()
 
@@ -47,46 +123,18 @@ Public Module GuideImporter
                         cmd.Parameters.Add("@episode", SqliteType.Integer)
                         cmd.Parameters.Add("@eptitle", SqliteType.Text)
 
-                        ' SD lookup command — reused for every row
-                        Dim sdCmd As New SqliteCommand("
-                        SELECT program_type, season_number, episode_number, episode_title
-                        FROM guide
-                        WHERE normalized_title = @norm
-                        AND xml_file = 'schedules_direct'
-                        AND ABS(strftime('%s', start_utc) - strftime('%s', @start)) <= 1800
-                        ORDER BY ABS(strftime('%s', start_utc) - strftime('%s', @start))
-                        LIMIT 1", con, trans)
-                        sdCmd.Parameters.Add("@norm", SqliteType.Text)
-                        sdCmd.Parameters.Add("@start", SqliteType.Text)
-
                         Dim settings As New XmlReaderSettings()
                         settings.DtdProcessing = DtdProcessing.Parse
+                        Dim inserted = 0
+                        Dim skipped = 0
 
-                        Using reader = XmlReader.Create(xmlFile, settings)
-                            While reader.Read()
-                                If reader.NodeType = XmlNodeType.Element AndAlso reader.Name = "programme" Then
-                                    Dim channel = reader.GetAttribute("channel")
-                                    Dim startAttr = reader.GetAttribute("start")
-                                    Dim stopAttr = reader.GetAttribute("stop")
-                                    If channel Is Nothing OrElse startAttr Is Nothing OrElse stopAttr Is Nothing Then Continue While
+                        For Each entry In entries
+                            Dim guideKey = entry.Channel & vbTab & entry.StartUtc
 
-                                    Dim startUtc = ParseXmltvTime(startAttr.Substring(0, 14))
-                                    Dim endUtc = ParseXmltvTime(stopAttr.Substring(0, 14))
-
-                                    Dim title As String = ""
-                                    While reader.Read()
-                                        If reader.NodeType = XmlNodeType.Element AndAlso reader.Name = "title" Then
-                                            title = reader.ReadElementContentAsString()
-                                            Exit While
-                                        End If
-                                        If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Name = "programme" Then
-                                            Exit While
-                                        End If
-                                    End While
-
-                                    If String.IsNullOrWhiteSpace(title) Then Continue While
-
-                                    Dim normalized = NormalizeTitle(title)
+                            If existingGuideKeys.Contains(guideKey) Then
+                                skipped += 1
+                                Continue For
+                            End If
 
                                     ' Look up SD episode info
                                     Dim progType As Object = DBNull.Value
@@ -94,33 +142,51 @@ Public Module GuideImporter
                                     Dim episodeNum As Object = DBNull.Value
                                     Dim epTitle As Object = DBNull.Value
 
-                                    sdCmd.Parameters("@norm").Value = normalized
-                                    sdCmd.Parameters("@start").Value = startUtc
+                                    Dim sdItems As List(Of SdGuideInfo) = Nothing
+                            If sdLookup.TryGetValue(entry.NormalizedTitle, sdItems) Then
+                                        Dim best As SdGuideInfo = Nothing
+                                        Dim bestDelta = Double.MaxValue
 
-                                    Using rdr = sdCmd.ExecuteReader()
-                                        If rdr.Read() Then
-                                            If Not IsDBNull(rdr("program_type")) Then progType = rdr("program_type")
-                                            If Not IsDBNull(rdr("season_number")) Then seasonNum = rdr("season_number")
-                                            If Not IsDBNull(rdr("episode_number")) Then episodeNum = rdr("episode_number")
-                                            If Not IsDBNull(rdr("episode_title")) Then epTitle = rdr("episode_title")
+                                        For Each item In sdItems
+                                    Dim delta = Math.Abs((item.StartTime - entry.StartTime).TotalSeconds)
+                                            If delta <= 1800 AndAlso delta < bestDelta Then
+                                                best = item
+                                                bestDelta = delta
+                                            End If
+                                        Next
+
+                                        If best IsNot Nothing Then
+                                            progType = best.ProgramType
+                                            seasonNum = best.SeasonNumber
+                                            episodeNum = best.EpisodeNumber
+                                            epTitle = best.EpisodeTitle
                                         End If
-                                    End Using
+                                    End If
 
-                                    cmd.Parameters("@t").Value = title
-                                    cmd.Parameters("@n").Value = normalized
-                                    cmd.Parameters("@c").Value = channel
-                                    cmd.Parameters("@s").Value = startUtc
-                                    cmd.Parameters("@e").Value = endUtc
+                            cmd.Parameters("@t").Value = entry.Title
+                            cmd.Parameters("@n").Value = entry.NormalizedTitle
+                            cmd.Parameters("@c").Value = entry.Channel
+                            cmd.Parameters("@s").Value = entry.StartUtc
+                            cmd.Parameters("@e").Value = entry.EndUtc
                                     cmd.Parameters("@x").Value = Path.GetFileName(xmlFile)
                                     cmd.Parameters("@progtype").Value = progType
                                     cmd.Parameters("@season").Value = seasonNum
                                     cmd.Parameters("@episode").Value = episodeNum
                                     cmd.Parameters("@eptitle").Value = epTitle
 
-                                    cmd.ExecuteNonQuery()
-                                End If
-                            End While
-                        End Using
+                                    If cmd.ExecuteNonQuery() > 0 Then
+                                        inserted += 1
+                                        existingGuideKeys.Add(guideKey)
+                                    Else
+                                        skipped += 1
+                                    End If
+
+                                    If inserted > 0 AndAlso inserted Mod 10000 = 0 Then
+                                        Debug.WriteLine($"XML → ImportXml progress: {inserted} inserted, {skipped} skipped")
+                                    End If
+                        Next
+
+                        Debug.WriteLine($"XML → ImportXml complete: {Path.GetFileName(xmlFile)} | Inserted: {inserted} | Skipped: {skipped}")
                     End Using
 
                     trans.Commit()
@@ -128,6 +194,53 @@ Public Module GuideImporter
             End Using
         End SyncLock
     End Sub
+
+    Private Function LoadXmlEntries(xmlFile As String) As List(Of XmlGuideEntry)
+        Dim entries As New List(Of XmlGuideEntry)
+        Dim settings As New XmlReaderSettings()
+        settings.DtdProcessing = DtdProcessing.Parse
+
+        Using reader = XmlReader.Create(xmlFile, settings)
+            While reader.Read()
+                If reader.NodeType <> XmlNodeType.Element OrElse reader.Name <> "programme" Then Continue While
+
+                Dim channel = reader.GetAttribute("channel")
+                Dim startAttr = reader.GetAttribute("start")
+                Dim stopAttr = reader.GetAttribute("stop")
+                If channel Is Nothing OrElse startAttr Is Nothing OrElse stopAttr Is Nothing Then Continue While
+
+                Dim startUtc = ParseXmltvTime(startAttr.Substring(0, 14))
+                Dim endUtc = ParseXmltvTime(stopAttr.Substring(0, 14))
+
+                Dim title As String = ""
+                While reader.Read()
+                    If reader.NodeType = XmlNodeType.Element AndAlso reader.Name = "title" Then
+                        title = reader.ReadElementContentAsString()
+                        Exit While
+                    End If
+                    If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Name = "programme" Then
+                        Exit While
+                    End If
+                End While
+
+                If String.IsNullOrWhiteSpace(title) Then Continue While
+
+                Dim startTime As DateTime
+                If Not DateTime.TryParse(startUtc, startTime) Then Continue While
+
+                entries.Add(New XmlGuideEntry With {
+                    .Title = title,
+                    .NormalizedTitle = NormalizeTitle(title),
+                    .Channel = channel,
+                    .StartUtc = startUtc,
+                    .EndUtc = endUtc,
+                    .StartTime = startTime
+                })
+            End While
+        End Using
+
+        Return entries
+    End Function
 
     Private Sub EnsureIndexes(con As SqliteConnection)
         SyncLock GlobalState.DbLock
