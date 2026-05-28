@@ -136,54 +136,54 @@ Public Module GuideImporter
                                 Continue For
                             End If
 
-                                    ' Look up SD episode info
-                                    Dim progType As Object = DBNull.Value
-                                    Dim seasonNum As Object = DBNull.Value
-                                    Dim episodeNum As Object = DBNull.Value
-                                    Dim epTitle As Object = DBNull.Value
+                            ' Look up SD episode info
+                            Dim progType As Object = DBNull.Value
+                            Dim seasonNum As Object = DBNull.Value
+                            Dim episodeNum As Object = DBNull.Value
+                            Dim epTitle As Object = DBNull.Value
 
-                                    Dim sdItems As List(Of SdGuideInfo) = Nothing
+                            Dim sdItems As List(Of SdGuideInfo) = Nothing
                             If sdLookup.TryGetValue(entry.NormalizedTitle, sdItems) Then
-                                        Dim best As SdGuideInfo = Nothing
-                                        Dim bestDelta = Double.MaxValue
+                                Dim best As SdGuideInfo = Nothing
+                                Dim bestDelta = Double.MaxValue
 
-                                        For Each item In sdItems
+                                For Each item In sdItems
                                     Dim delta = Math.Abs((item.StartTime - entry.StartTime).TotalSeconds)
-                                            If delta <= 1800 AndAlso delta < bestDelta Then
-                                                best = item
-                                                bestDelta = delta
-                                            End If
-                                        Next
-
-                                        If best IsNot Nothing Then
-                                            progType = best.ProgramType
-                                            seasonNum = best.SeasonNumber
-                                            episodeNum = best.EpisodeNumber
-                                            epTitle = best.EpisodeTitle
-                                        End If
+                                    If delta <= 1800 AndAlso delta < bestDelta Then
+                                        best = item
+                                        bestDelta = delta
                                     End If
+                                Next
+
+                                If best IsNot Nothing Then
+                                    progType = best.ProgramType
+                                    seasonNum = best.SeasonNumber
+                                    episodeNum = best.EpisodeNumber
+                                    epTitle = best.EpisodeTitle
+                                End If
+                            End If
 
                             cmd.Parameters("@t").Value = entry.Title
                             cmd.Parameters("@n").Value = entry.NormalizedTitle
                             cmd.Parameters("@c").Value = entry.Channel
                             cmd.Parameters("@s").Value = entry.StartUtc
                             cmd.Parameters("@e").Value = entry.EndUtc
-                                    cmd.Parameters("@x").Value = Path.GetFileName(xmlFile)
-                                    cmd.Parameters("@progtype").Value = progType
-                                    cmd.Parameters("@season").Value = seasonNum
-                                    cmd.Parameters("@episode").Value = episodeNum
-                                    cmd.Parameters("@eptitle").Value = epTitle
+                            cmd.Parameters("@x").Value = Path.GetFileName(xmlFile)
+                            cmd.Parameters("@progtype").Value = progType
+                            cmd.Parameters("@season").Value = seasonNum
+                            cmd.Parameters("@episode").Value = episodeNum
+                            cmd.Parameters("@eptitle").Value = epTitle
 
-                                    If cmd.ExecuteNonQuery() > 0 Then
-                                        inserted += 1
-                                        existingGuideKeys.Add(guideKey)
-                                    Else
-                                        skipped += 1
-                                    End If
+                            If cmd.ExecuteNonQuery() > 0 Then
+                                inserted += 1
+                                existingGuideKeys.Add(guideKey)
+                            Else
+                                skipped += 1
+                            End If
 
-                                    If inserted > 0 AndAlso inserted Mod 10000 = 0 Then
-                                        Debug.WriteLine($"XML → ImportXml progress: {inserted} inserted, {skipped} skipped")
-                                    End If
+                            If inserted > 0 AndAlso inserted Mod 10000 = 0 Then
+                                Debug.WriteLine($"XML → ImportXml progress: {inserted} inserted, {skipped} skipped")
+                            End If
                         Next
 
                         Debug.WriteLine($"XML → ImportXml complete: {Path.GetFileName(xmlFile)} | Inserted: {inserted} | Skipped: {skipped}")
@@ -244,7 +244,7 @@ Public Module GuideImporter
 
     Private Sub EnsureIndexes(con As SqliteConnection)
         SyncLock GlobalState.DbLock
-            Using cmd As New SQLiteCommand("
+            Using cmd As New SqliteCommand("
             CREATE UNIQUE INDEX IF NOT EXISTS idx_guide_unique
             ON guide(channel, start_utc);
         ", con)

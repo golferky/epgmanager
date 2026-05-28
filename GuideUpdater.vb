@@ -5,6 +5,8 @@ Imports System.Threading
 
 Public Module GuideUpdater
 
+    Private Const BackupRetentionDays As Integer = 7
+
     Public Sub UpdateGuide()
         Dim localGuideDb = _DbPath
         Dim stampFile = Path.Combine(_guideDir, "last_import.txt")
@@ -16,6 +18,8 @@ Public Module GuideUpdater
 
         If needsImport Then
             Debug.WriteLine("")
+            BackupDatabase(localGuideDb, "pre_import")
+
             Debug.WriteLine("Downloading XML guide...")
             DownloadGuideProperly(guideUrl, localPath, _userAgentTM)
 
@@ -43,12 +47,48 @@ Public Module GuideUpdater
             Debug.WriteLine("Guide index rebuild skipped during refresh")
             GuideUpdateDetector.SaveUpdateStamp(_guideDir, stampFile)
             Debug.WriteLine("Guide update complete.")
+
+            BackupDatabase(localGuideDb, "post_import")
         Else
             Debug.WriteLine("Guide unchanged → skipping download")
         End If
 
         Debug.WriteLine("Refreshing provider stream IDs...")
         RefreshStreamIds(localGuideDb)
+    End Sub
+
+    Private Sub BackupDatabase(dbPath As String, label As String)
+        If String.IsNullOrWhiteSpace(dbPath) OrElse Not File.Exists(dbPath) Then
+            Throw New FileNotFoundException("Cannot back up missing database", dbPath)
+        End If
+
+        Dim backupDir = Path.Combine(Path.GetDirectoryName(MY_CONFIG), "backups")
+        Directory.CreateDirectory(backupDir)
+
+        Dim sourceName = Path.GetFileNameWithoutExtension(dbPath)
+        Dim backupPath = Path.Combine(
+            backupDir,
+            $"{sourceName}_{label}_{DateTime.Now:yyyyMMdd_HHmmss}.db")
+
+        File.Copy(dbPath, backupPath, overwrite:=False)
+        Debug.WriteLine($"DB backup created: {backupPath}")
+        PruneOldBackups(backupDir)
+    End Sub
+
+    Private Sub PruneOldBackups(backupDir As String)
+        Dim cutoff = DateTime.Now.AddDays(-BackupRetentionDays)
+
+        For Each file In Directory.EnumerateFiles(backupDir, "Movies_*.db")
+            Try
+                Dim info As New FileInfo(file)
+                If info.LastWriteTime < cutoff Then
+                    info.Delete()
+                    Debug.WriteLine($"Old DB backup deleted: {file}")
+                End If
+            Catch ex As Exception
+                Debug.WriteLine("Backup prune skipped: " & ex.Message)
+            End Try
+        Next
     End Sub
 
     Public Sub DownloadGuideProperly(url As String,
