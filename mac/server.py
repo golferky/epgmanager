@@ -18,7 +18,7 @@ from flask import Flask, jsonify, request
 app = Flask(__name__)
 
 # --- CONFIG ------------------------------------------------
-SERVER_VERSION = "2026.05.30.2"
+SERVER_VERSION = "2026.05.30.3"
 NAS_MOVIES_PATH = "/Volumes/Plex/Movies"
 NAS_TV_PATH = "/Volumes/Plex/TV Shows"
 FIRE_TV_PATH = "/Volumes/Fire TV"
@@ -1073,6 +1073,7 @@ def normalize_title(name: str) -> str:
     stem = Path(name).stem
     stem = re.sub(r"[_\s-]*\d{8}[_-]\d{6}$", "", stem)
     stem = re.sub(r"\s*\(\d{4}\)\s*$", "", stem)
+    stem = re.sub(r"[_\s-]+(?:19|20)\d{2}$", "", stem)
     stem = re.sub(r"\s+", " ", stem)
     return re.sub(r"[^a-z0-9]+", "", stem.lower())
 
