@@ -229,14 +229,20 @@ Public Module Recorder
                     t.Start()
 
                 Else
+                    Dim reason = $"Mac API error {CInt(response.StatusCode)}: {responseBody}"
                     Logger.Log($"MAC API ERROR → {response.StatusCode}", "Recorder", "RecordOnMac", "ERROR")
-                    UpdateRecordingStatus(recJob, "failed")
+                    UpdateRecordingStatus(recJob, "failed", reason)
                 End If
 
             End Using
 
         Catch ex As Exception
             Logger.Log($"RecordOnMac EXCEPTION → {ex.Message}", "Recorder", "RecordOnMac", "ERROR")
+            Dim recJob As New RecordingJob With {
+                .Title = scheduledTitle,
+                .StartTime = startTime
+            }
+            UpdateRecordingStatus(recJob, "failed", "RecordOnMac exception: " & ex.Message)
         End Try
     End Sub
 
@@ -267,7 +273,8 @@ Public Module Recorder
                                 UpdateRecordingStatus(job, "completed")
                                 Return
                             Case "failed"
-                                UpdateRecordingStatus(job, "failed")
+                                Dim errorText = json("error")?.ToString()
+                                UpdateRecordingStatus(job, "failed", errorText)
                                 Return
                             Case "cancelled"
                                 UpdateRecordingStatus(job, "cancelled")
@@ -286,7 +293,7 @@ Public Module Recorder
 
                 ' Timed out after 4 hours
                 Logger.Log($"POLL TIMEOUT → {job.Title}", "Recorder", "PollJobStatus", "ERROR")
-                UpdateRecordingStatus(job, "timeout")
+                UpdateRecordingStatus(job, "timeout", "Mac recorder polling timed out after 4 hours")
 
             End Using
 
@@ -351,7 +358,7 @@ Public Module Recorder
 
         If p.ExitCode <> 0 Then
             Logger.Log($"{stage} FAILED → {job.Title}")
-            UpdateRecordingStatus(job, "failed")
+            UpdateRecordingStatus(job, "failed", $"{stage} failed with exit code {p.ExitCode}")
         Else
             Logger.Log($"{stage} OK → {job.Title}")
             UpdateRecordingStatus(job, "complete")
@@ -430,18 +437,25 @@ Public Module Recorder
     ' =========================================================
     ' DB STATUS UPDATE
     ' =========================================================
-    Public Sub UpdateRecordingStatus(job As RecordingJob, status As String)
+    Public Sub UpdateRecordingStatus(job As RecordingJob, status As String, Optional failureReason As String = Nothing)
 
         Logger.Log($"STATUS → {status} | {job.Title}", "Recorder", "UpdateRecordingStatus")
 
         SyncLock GlobalState.DbLock
             Using con As New SqliteConnection($"Data Source={_DbPath}")
                 con.Open()
+                EnsureRecordingFailureColumns(con)
+                EnsureChannelHealthTables(con)
 
                 Dim cmd As New SqliteCommand("
                     UPDATE scheduled_recordings
                     SET status = @status,
-                        job_id = @jobId
+                        job_id = @jobId,
+                        failure_reason = CASE
+                            WHEN @failureReason IS NOT NULL AND @failureReason <> '' THEN @failureReason
+                            WHEN @status IN ('scheduled','queued','recording','completed','complete','cancelled','stopped') THEN NULL
+                            ELSE failure_reason
+                        END
                     WHERE title = @title
                     AND start_time = @start
                 ", con)
@@ -450,11 +464,130 @@ Public Module Recorder
                 cmd.Parameters.AddWithValue("@title", job.Title)
                 cmd.Parameters.AddWithValue("@start", job.StartTime)
                 cmd.Parameters.AddWithValue("@jobId", job.Jobid)
+                cmd.Parameters.AddWithValue("@failureReason", If(String.IsNullOrWhiteSpace(failureReason), CObj(DBNull.Value), CObj(failureReason)))
 
                 cmd.ExecuteNonQuery()
+
+                If status = "failed" AndAlso IsProviderFailure(failureReason) Then
+                    RecordChannelFailure(con, job, failureReason)
+                End If
             End Using
         End SyncLock
 
+    End Sub
+
+    Private Sub EnsureRecordingFailureColumns(con As SqliteConnection)
+        Using cmd As New SqliteCommand("
+            ALTER TABLE scheduled_recordings ADD COLUMN failure_reason TEXT;
+        ", con)
+            Try
+                cmd.ExecuteNonQuery()
+            Catch ex As SqliteException When ex.SqliteErrorCode = 1 AndAlso ex.Message.IndexOf("duplicate column name", StringComparison.OrdinalIgnoreCase) >= 0
+            End Try
+        End Using
+    End Sub
+
+    Private Sub EnsureChannelHealthTables(con As SqliteConnection)
+        Using cmd As New SqliteCommand("
+            CREATE TABLE IF NOT EXISTS channel_recording_failures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel TEXT NOT NULL,
+                job_id TEXT,
+                title TEXT,
+                start_time TEXT,
+                failure_reason TEXT,
+                failed_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                UNIQUE(job_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS channel_health (
+                channel TEXT PRIMARY KEY,
+                failed_count_7_days INTEGER NOT NULL DEFAULT 0,
+                last_failed_at TEXT,
+                last_failure_reason TEXT,
+                is_suspect INTEGER NOT NULL DEFAULT 0,
+                suspect_until TEXT
+            );
+        ", con)
+            cmd.ExecuteNonQuery()
+        End Using
+    End Sub
+
+    Private Function IsProviderFailure(reason As String) As Boolean
+        If String.IsNullOrWhiteSpace(reason) Then Return False
+
+        Dim r = reason.ToLowerInvariant()
+        Return r.Contains("403") OrElse
+               r.Contains("404") OrElse
+               r.Contains("forbidden") OrElse
+               r.Contains("access denied") OrElse
+               r.Contains("error opening input") OrElse
+               r.Contains("connection") OrElse
+               r.Contains("timed out") OrElse
+               r.Contains("timeout") OrElse
+               r.Contains("output file missing") OrElse
+               r.Contains("too small")
+    End Function
+
+    Private Sub RecordChannelFailure(con As SqliteConnection, job As RecordingJob, reason As String)
+        Dim channel As String = Nothing
+        Dim startText = job.StartTime.ToString("yyyy-MM-dd HH:mm:ss")
+
+        Using find As New SqliteCommand("
+            SELECT channel
+            FROM scheduled_recordings
+            WHERE title = @title
+            AND start_time = @start
+            LIMIT 1", con)
+            find.Parameters.AddWithValue("@title", job.Title)
+            find.Parameters.AddWithValue("@start", startText)
+            Dim result = find.ExecuteScalar()
+            If result IsNot Nothing AndAlso result IsNot DBNull.Value Then channel = result.ToString()
+        End Using
+
+        If String.IsNullOrWhiteSpace(channel) Then Return
+
+        Using insertFailure As New SqliteCommand("
+            INSERT OR IGNORE INTO channel_recording_failures
+                (channel, job_id, title, start_time, failure_reason)
+            VALUES
+                (@channel, @jobId, @title, @start, @reason)", con)
+            insertFailure.Parameters.AddWithValue("@channel", channel)
+            insertFailure.Parameters.AddWithValue("@jobId", If(String.IsNullOrWhiteSpace(job.Jobid), CObj(DBNull.Value), CObj(job.Jobid)))
+            insertFailure.Parameters.AddWithValue("@title", job.Title)
+            insertFailure.Parameters.AddWithValue("@start", startText)
+            insertFailure.Parameters.AddWithValue("@reason", If(String.IsNullOrWhiteSpace(reason), CObj(DBNull.Value), CObj(reason)))
+            insertFailure.ExecuteNonQuery()
+        End Using
+
+        Dim failedCount As Integer
+        Using countCmd As New SqliteCommand("
+            SELECT COUNT(*)
+            FROM channel_recording_failures
+            WHERE channel = @channel
+            AND failed_at >= datetime('now','localtime','-7 days')", con)
+            countCmd.Parameters.AddWithValue("@channel", channel)
+            failedCount = Convert.ToInt32(countCmd.ExecuteScalar())
+        End Using
+
+        Using updateHealth As New SqliteCommand("
+            INSERT INTO channel_health
+                (channel, failed_count_7_days, last_failed_at, last_failure_reason, is_suspect, suspect_until)
+            VALUES
+                (@channel, @count, datetime('now','localtime'), @reason, @suspect,
+                 CASE WHEN @suspect = 1 THEN datetime('now','localtime','+7 days') ELSE NULL END)
+            ON CONFLICT(channel) DO UPDATE SET
+                failed_count_7_days = excluded.failed_count_7_days,
+                last_failed_at = excluded.last_failed_at,
+                last_failure_reason = excluded.last_failure_reason,
+                is_suspect = excluded.is_suspect,
+                suspect_until = excluded.suspect_until", con)
+            updateHealth.Parameters.AddWithValue("@channel", channel)
+            updateHealth.Parameters.AddWithValue("@count", failedCount)
+            updateHealth.Parameters.AddWithValue("@reason", If(String.IsNullOrWhiteSpace(reason), CObj(DBNull.Value), CObj(reason)))
+            updateHealth.Parameters.AddWithValue("@suspect", If(failedCount >= 2, 1, 0))
+            updateHealth.ExecuteNonQuery()
+        End Using
     End Sub
 
     ' =========================================================

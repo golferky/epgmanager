@@ -38,6 +38,7 @@ Public Module epgmanager
     Public _userAgent As String = ""
     Public _rootPath As String = ""
     Public _OMDBAPIkey As String = ""
+    Public _TMDBAPIkey As String = ""
     Public _recordingDir As String = ""
 
     Private _preferredChannels As New HashSet(Of String)
@@ -612,6 +613,7 @@ Public Module epgmanager
 
                 _firestickIp = root.GetProperty("FIRESTICK_IP").GetString()
                 _OMDBAPIkey = root.GetProperty("OMDB_KEY").GetString()
+                If root.TryGetProperty("TMDB_KEY", prop) Then _TMDBAPIkey = prop.GetString()
                 _DbPath = root.GetProperty("DB_PATH").GetString()
                 _guideDir = root.GetProperty("GUIDE_DATA_DIR").GetString()
                 _nasWarehouseDir = root.GetProperty("WAREHOUSE").GetString()
