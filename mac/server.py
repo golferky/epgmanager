@@ -18,7 +18,7 @@ from flask import Flask, jsonify, request
 app = Flask(__name__)
 
 # --- CONFIG ------------------------------------------------
-SERVER_VERSION = "2026.05.30.3"
+SERVER_VERSION = "2026.05.31.1"
 NAS_MOVIES_PATH = "/Volumes/Plex/Movies"
 NAS_TV_PATH = "/Volumes/Plex/TV Shows"
 FIRE_TV_PATH = "/Volumes/Fire TV"
@@ -1070,7 +1070,8 @@ def clean_series_title(name: str) -> str:
 
 def normalize_title(name: str) -> str:
     import re
-    stem = Path(name).stem
+    path = Path(name)
+    stem = path.stem if path.suffix.lower() in (".ts", ".mp4", ".mkv", ".avi", ".mov", ".m4v") else name
     stem = re.sub(r"[_\s-]*\d{8}[_-]\d{6}$", "", stem)
     stem = re.sub(r"\s*\(\d{4}\)\s*$", "", stem)
     stem = re.sub(r"[_\s-]+(?:19|20)\d{2}$", "", stem)
