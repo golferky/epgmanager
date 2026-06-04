@@ -189,53 +189,84 @@ Public Module GuideUpdater
     End Sub
 
     Public Sub RefreshStreamIds(dbPath As String)
+        Try
 
-        Dim json = GetXtreamJson(_epgUrl, _epgUser, _epgPass, _userAgentTM)
+            Dim json = GetXtreamJson(_epgUrl, _epgUser, _epgPass, _userAgentTM)
 
-        If String.IsNullOrWhiteSpace(json) OrElse json.Contains("""error""") Then
-            Logger.Log("RefreshStreamIds — bad response from API", "GuideUpdater", "RefreshStreamIds", "WARN")
-            Return
-        End If
+            If String.IsNullOrWhiteSpace(json) OrElse json.Contains("""error""") Then
+                Logger.Log("RefreshStreamIds — bad response from API", "GuideUpdater", "RefreshStreamIds", "WARN")
+                Debug.WriteLine("RefreshStreamIds skipped: bad response from API")
+                Return
+            End If
 
-        Dim streams = JsonDocument.Parse(json).RootElement
+            Using doc = JsonDocument.Parse(json)
+                Dim streams = doc.RootElement
+                Dim updated = 0
+                Dim skipped = 0
 
-        SyncLock GlobalState.DbLock
-            Using con As New SqliteConnection($"Data Source={dbPath}")
-                con.Open()
+                SyncLock GlobalState.DbLock
+                    Using con As New SqliteConnection($"Data Source={dbPath};Pooling=False;")
+                        con.Open()
+                        Using busy As New SqliteCommand("PRAGMA busy_timeout=30000", con)
+                            busy.ExecuteNonQuery()
+                        End Using
 
-                For Each stream In streams.EnumerateArray()
+                        Using tx = con.BeginTransaction()
+                            For Each stream In streams.EnumerateArray()
 
-                    Dim streamId = stream.GetProperty("stream_id").GetInt32()
-                    Dim name = stream.GetProperty("name").GetString()
-                    Dim epgId As String = Nothing
-                    Dim prop As JsonElement
+                                Dim prop As JsonElement
+                                If Not stream.TryGetProperty("stream_id", prop) Then
+                                    skipped += 1
+                                    Continue For
+                                End If
+                                Dim streamId = prop.GetInt32()
 
-                    If stream.TryGetProperty("epg_channel_id", prop) _
-                        AndAlso prop.ValueKind <> JsonValueKind.Null Then
-                        epgId = prop.GetString()
-                    End If
+                                Dim name As String = Nothing
+                                If stream.TryGetProperty("name", prop) _
+                                    AndAlso prop.ValueKind = JsonValueKind.String Then
+                                    name = prop.GetString()
+                                End If
 
-                    Dim sql As String
-                    If Not String.IsNullOrEmpty(epgId) Then
-                        sql = "UPDATE channels SET stream_id=@sid WHERE guide_channel=@gid"
-                    Else
-                        sql = "UPDATE channels SET stream_id=@sid WHERE nickname=@name"
-                    End If
+                                Dim epgId As String = Nothing
+                                If stream.TryGetProperty("epg_channel_id", prop) _
+                                    AndAlso prop.ValueKind <> JsonValueKind.Null Then
+                                    epgId = prop.GetString()
+                                End If
 
-                    Using cmd As New SqliteCommand(sql, con)
-                        cmd.Parameters.AddWithValue("@sid", streamId)
-                        cmd.Parameters.AddWithValue("@gid", If(epgId, CObj(DBNull.Value)))
-                        cmd.Parameters.AddWithValue("@name", name)
-                        cmd.ExecuteNonQuery()
+                                Dim sql As String
+                                If Not String.IsNullOrEmpty(epgId) Then
+                                    sql = "UPDATE channels SET stream_id=@sid WHERE guide_channel=@gid"
+                                ElseIf Not String.IsNullOrWhiteSpace(name) Then
+                                    sql = "UPDATE channels SET stream_id=@sid WHERE nickname=@name"
+                                Else
+                                    skipped += 1
+                                    Continue For
+                                End If
+
+                                Using cmd As New SqliteCommand(sql, con, tx)
+                                    cmd.Parameters.AddWithValue("@sid", streamId)
+                                    cmd.Parameters.AddWithValue("@gid", If(epgId, CObj(DBNull.Value)))
+                                    cmd.Parameters.AddWithValue("@name", If(name, CObj(DBNull.Value)))
+                                    updated += cmd.ExecuteNonQuery()
+                                End Using
+
+                            Next
+
+                            tx.Commit()
+                        End Using
                     End Using
+                End SyncLock
 
-                Next
-
+                Debug.WriteLine($"Stream IDs refreshed: {updated} channel row(s) updated; {skipped} stream(s) skipped")
+                Logger.Log($"Stream IDs refreshed: {updated} channel row(s) updated; {skipped} stream(s) skipped", "GuideUpdater", "RefreshStreamIds")
             End Using
-        End SyncLock
-
-        Logger.Log("Stream IDs refreshed", "GuideUpdater", "RefreshStreamIds")
-
+        Catch ex As SqliteException
+            Debug.WriteLine($"RefreshStreamIds SQLite error {ex.SqliteErrorCode}: {ex.Message}")
+            Logger.Log($"RefreshStreamIds SQLite error {ex.SqliteErrorCode}: {ex.Message}", "GuideUpdater", "RefreshStreamIds", "ERROR")
+        Catch ex As Exception
+            Debug.WriteLine("RefreshStreamIds error: " & ex.Message)
+            Logger.Log("RefreshStreamIds error: " & ex.Message, "GuideUpdater", "RefreshStreamIds", "ERROR")
+        End Try
     End Sub
 
 End Module

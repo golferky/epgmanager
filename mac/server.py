@@ -18,7 +18,7 @@ from flask import Flask, jsonify, request
 app = Flask(__name__)
 
 # --- CONFIG ------------------------------------------------
-SERVER_VERSION = "2026.05.31.1"
+SERVER_VERSION = "2026.06.04.1"
 NAS_MOVIES_PATH = "/Volumes/Plex/Movies"
 NAS_TV_PATH = "/Volumes/Plex/TV Shows"
 FIRE_TV_PATH = "/Volumes/Fire TV"
@@ -36,6 +36,7 @@ DB_PATH = "/Volumes/EPG/Movies.db"
 CONFIG_PATH = "/Users/garyscudder/epg/config.json"
 
 SCHEDULER_INTERVAL_SECONDS = 15
+STATUS_INTERVAL_SECONDS = 30
 CLAIM_WINDOW_SECONDS = 60
 RECORDING_PADDING_SECONDS = 120
 CONVERSION_RECORDING_SAFETY_SECONDS = 15 * 60
@@ -60,7 +61,11 @@ jobs = {}
 jobs_lock = threading.Lock()
 conversion_lock = threading.Lock()
 active_conversion = None
+conversion_queue = []
+conversion_queue_history = []
+conversion_queue_lock = threading.Lock()
 stop_scheduler = threading.Event()
+config_loaded = False
 
 
 # =========================================================
@@ -70,10 +75,12 @@ stop_scheduler = threading.Event()
 def load_config():
     global DB_PATH
     global NAS_MOVIES_PATH, NAS_TV_PATH, FIRE_TV_PATH, FIRE_TV_PATHS, FFMPEG_PATH, SERVER_PORT, UPCOMING_JSON_PATH
+    global config_loaded
 
     path = Path(CONFIG_PATH)
     if not path.exists():
         log.warning(f"Mac config not found at {CONFIG_PATH}; using constants")
+        config_loaded = False
         return
 
     try:
@@ -97,7 +104,9 @@ def load_config():
 
         port = first_config_value(data, "SERVER_PORT", "server_port", "MAC_PORT", "mac_port", default=SERVER_PORT)
         SERVER_PORT = int(port)
+        config_loaded = True
     except Exception as e:
+        config_loaded = False
         log.error(f"Could not load config {CONFIG_PATH}: {e}")
 
 
@@ -148,6 +157,59 @@ def load_app_settings(*keys):
         ).fetchall()
 
     return {r["key"]: r["value"] for r in rows}
+
+
+def load_runtime_settings():
+    global RECORDING_PADDING_SECONDS, CONVERSION_RECORDING_SAFETY_SECONDS, MIN_DURATION_RATIO, MIN_AVG_BITRATE_KBPS
+
+    try:
+        settings = load_app_settings(
+            "recording_padding_seconds",
+            "conversion_recording_safety_seconds",
+            "min_duration_ratio",
+            "min_avg_bitrate_kbps",
+        )
+    except Exception as e:
+        log.warning(f"Runtime app_settings unavailable; using defaults: {e}")
+        return
+
+    RECORDING_PADDING_SECONDS = parse_int_setting(settings, "recording_padding_seconds", RECORDING_PADDING_SECONDS)
+    CONVERSION_RECORDING_SAFETY_SECONDS = parse_int_setting(settings, "conversion_recording_safety_seconds", CONVERSION_RECORDING_SAFETY_SECONDS)
+    MIN_DURATION_RATIO = parse_float_setting(settings, "min_duration_ratio", MIN_DURATION_RATIO)
+    MIN_AVG_BITRATE_KBPS = parse_int_setting(settings, "min_avg_bitrate_kbps", MIN_AVG_BITRATE_KBPS)
+
+
+def parse_int_setting(settings: dict, key: str, default: int) -> int:
+    try:
+        value = settings.get(key)
+        if value in (None, ""):
+            return default
+        return int(value)
+    except Exception:
+        log.warning(f"Invalid integer app_setting {key}={settings.get(key)!r}; using {default}")
+        return default
+
+
+def parse_float_setting(settings: dict, key: str, default: float) -> float:
+    try:
+        value = settings.get(key)
+        if value in (None, ""):
+            return default
+        return float(value)
+    except Exception:
+        log.warning(f"Invalid numeric app_setting {key}={settings.get(key)!r}; using {default}")
+        return default
+
+
+def log_recording_settings_status():
+    try:
+        settings = load_app_settings("recording_base_url", "recording_user", "recording_pass")
+        base_ok = bool(settings.get("recording_base_url"))
+        user_ok = bool(settings.get("recording_user"))
+        pass_ok = bool(settings.get("recording_pass"))
+        log.info(f"Recording Config: base_url={base_ok}, user={user_ok}, pass={pass_ok}")
+    except Exception as e:
+        log.warning(f"Recording Config: unavailable ({e})")
 
 
 def update_recording_status(row_id: int, status: str, job_id: str = None, error: str = None):
@@ -558,7 +620,7 @@ def active_jobs():
 def convert_firetv():
     """
     POST /convert_firetv
-    Body: { title }
+    Body: { title, queue }
     Converts a matching Fire TV .ts capture into a Plex movie .mp4.
     The .ts source is deleted only after ffmpeg and ffprobe both succeed.
     """
@@ -567,6 +629,16 @@ def convert_firetv():
         title = (data.get("title") or "").strip()
         if not title:
             return jsonify({"error": "Missing field: title"}), 400
+
+        if bool(data.get("queue")):
+            item, added = enqueue_firetv_conversion(title)
+            status_code = 202 if added else 200
+            return jsonify({
+                "status": "queued" if added else item.get("status", "queued"),
+                "queued": added,
+                "item": item,
+                "queue": conversion_queue_snapshot(),
+            }), status_code
 
         guard = conversion_start_guard(title)
         if guard:
@@ -578,18 +650,6 @@ def convert_firetv():
                 details=json.dumps(guard),
             )
             return jsonify(guard), 409
-
-        source_path = find_fire_tv_capture(title)
-        if not source_path:
-            log.warning(f"CONVERT FIRETV MISS -> {title} | paths={FIRE_TV_PATHS}")
-            log_system_event(
-                "warn",
-                "conversion",
-                "Fire TV source file not found",
-                title=title,
-                details=f"paths={FIRE_TV_PATHS}",
-            )
-            return jsonify({"error": f"No matching .ts file found in {', '.join(FIRE_TV_PATHS)}", "title": title}), 404
 
         if not conversion_lock.acquire(blocking=False):
             log_system_event(
@@ -603,20 +663,13 @@ def convert_firetv():
 
         set_active_conversion(title)
         try:
-            log.info(f"CONVERT FIRETV START -> {title} | {source_path}")
-            result = convert_capture_to_plex_movie(title, source_path)
-            log.info(f"CONVERT FIRETV DONE -> {title} | {result.get('file')}")
-            log_system_event(
-                "info",
-                "conversion",
-                "Fire TV conversion completed",
-                title=title,
-                details=result.get("file"),
-            )
+            result = run_firetv_conversion(title)
             return jsonify(result)
         finally:
             set_active_conversion(None)
             conversion_lock.release()
+    except FileNotFoundError as e:
+        return jsonify({"error": str(e), "title": title if "title" in locals() else None}), 404
     except Exception as e:
         log.error(f"POST /convert_firetv error -> {e}")
         log_system_event(
@@ -627,6 +680,35 @@ def convert_firetv():
             details=str(e),
         )
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/convert_queue")
+def convert_queue_status():
+    return jsonify(conversion_queue_snapshot())
+
+
+@app.route("/convert_queue/clear", methods=["POST"])
+def clear_convert_queue():
+    removed = []
+    with conversion_queue_lock:
+        keep = []
+        for item in conversion_queue:
+            if item.get("status") == "running":
+                keep.append(item)
+            else:
+                removed.append(dict(item))
+        conversion_queue[:] = keep
+        if removed:
+            conversion_queue_history.extend(removed[-50:])
+            del conversion_queue_history[:-50]
+
+    log.info(f"CONVERT QUEUE CLEARED -> {len(removed)} waiting item(s) removed")
+    log_system_event("warn", "conversion", "Fire TV conversion queue cleared", details=f"removed={len(removed)}")
+    return jsonify({
+        "status": "ok",
+        "removed": len(removed),
+        "queue": conversion_queue_snapshot(),
+    })
 
 
 @app.route("/cancel/<job_id>", methods=["POST"])
@@ -748,6 +830,7 @@ def upcoming_html():
 
 def scheduler_loop():
     log.info("DB scheduler loop started")
+    last_status_log = 0
 
     while not stop_scheduler.is_set():
         try:
@@ -771,6 +854,11 @@ def scheduler_loop():
             log.error(f"scheduler loop error -> {e}")
             log_system_event("error", "scheduler", "Scheduler loop error", details=str(e))
 
+        now = time.time()
+        if now - last_status_log >= STATUS_INTERVAL_SECONDS:
+            log_runtime_status()
+            last_status_log = now
+
         stop_scheduler.wait(SCHEDULER_INTERVAL_SECONDS)
 
 
@@ -778,6 +866,137 @@ def set_active_conversion(title):
     global active_conversion
     with jobs_lock:
         active_conversion = title
+
+
+def log_runtime_status():
+    with jobs_lock:
+        recording_titles = [
+            j.get("title", "")
+            for j in jobs.values()
+            if j.get("status") == "recording"
+        ]
+        conversion_title = active_conversion
+
+    with conversion_queue_lock:
+        queued_count = sum(1 for item in conversion_queue if item.get("status") in ("queued", "deferred"))
+
+    parts = []
+    if recording_titles:
+        parts.append("recording: " + ", ".join(recording_titles[:4]))
+        if len(recording_titles) > 4:
+            parts.append(f"+{len(recording_titles) - 4} more recording")
+    else:
+        parts.append("recording: none")
+
+    if conversion_title:
+        parts.append(f"converting: {conversion_title}")
+    else:
+        parts.append("converting: none")
+
+    parts.append(f"conversion queue: {queued_count}")
+    log.info("STATUS -> " + " | ".join(parts))
+
+
+def conversion_queue_snapshot():
+    with conversion_queue_lock:
+        queued = [dict(item) for item in conversion_queue]
+        waiting_count = sum(1 for item in queued if item.get("status") in ("queued", "deferred"))
+        history = [dict(item) for item in conversion_queue_history[-25:]]
+
+    with jobs_lock:
+        active = active_conversion
+
+    return {
+        "active": active,
+        "queued_count": waiting_count,
+        "queued": queued,
+        "recent": history,
+    }
+
+
+def enqueue_firetv_conversion(title: str):
+    now = datetime.now().isoformat()
+    norm = normalize_title(title)
+
+    with conversion_queue_lock:
+        for item in conversion_queue:
+            if normalize_title(item.get("title", "")) == norm and item.get("status") in ("queued", "deferred"):
+                return item, False
+
+        item = {
+            "id": f"conv_{int(time.time())}_{len(conversion_queue) + 1}",
+            "title": title,
+            "status": "queued",
+            "queued_at": now,
+            "started_at": None,
+            "finished_at": None,
+            "message": None,
+        }
+        conversion_queue.append(item)
+
+    log.info(f"CONVERT QUEUED -> {title}")
+    log_system_event("info", "conversion", "Fire TV conversion queued", title=title)
+    return item, True
+
+
+def update_conversion_queue_item(item, status: str, message: str = None):
+    with conversion_queue_lock:
+        item["status"] = status
+        item["message"] = message
+        if status == "running":
+            item["started_at"] = datetime.now().isoformat()
+        if status in ("done", "failed"):
+            item["finished_at"] = datetime.now().isoformat()
+
+
+def finish_conversion_queue_item(item):
+    with conversion_queue_lock:
+        if item in conversion_queue:
+            conversion_queue.remove(item)
+        conversion_queue_history.append(dict(item))
+        del conversion_queue_history[:-50]
+
+
+def conversion_queue_loop():
+    log.info("Fire TV conversion queue loop started")
+
+    while not stop_scheduler.is_set():
+        item = None
+        with conversion_queue_lock:
+            if conversion_queue:
+                item = conversion_queue[0]
+
+        if not item:
+            stop_scheduler.wait(10)
+            continue
+
+        title = item["title"]
+        guard = conversion_start_guard(title)
+        if guard:
+            update_conversion_queue_item(item, "deferred", guard.get("error", "conversion deferred"))
+            stop_scheduler.wait(60)
+            continue
+
+        if not conversion_lock.acquire(blocking=False):
+            update_conversion_queue_item(item, "deferred", f"conversion already running: {active_conversion}")
+            stop_scheduler.wait(30)
+            continue
+
+        set_active_conversion(title)
+        update_conversion_queue_item(item, "running")
+        try:
+            result = run_firetv_conversion(title)
+            update_conversion_queue_item(item, "done", result.get("file"))
+        except Exception as e:
+            log.error(f"CONVERT QUEUE FAILED -> {title} | {e}")
+            log_system_event("error", "conversion", "Queued Fire TV conversion failed", title=title, details=str(e))
+            update_conversion_queue_item(item, "failed", str(e))
+        finally:
+            set_active_conversion(None)
+            conversion_lock.release()
+            finish_conversion_queue_item(item)
+
+        stop_scheduler.wait(3)
 
 
 def active_recording_titles():
@@ -808,11 +1027,7 @@ def next_scheduled_recording_within(seconds: int):
 def conversion_start_guard(title: str):
     active_titles = active_recording_titles()
     if active_titles:
-        return {
-            "error": "recording active; conversion deferred",
-            "title": title,
-            "active_recordings": active_titles,
-        }
+        return None
 
     try:
         next_row = next_scheduled_recording_within(CONVERSION_RECORDING_SAFETY_SECONDS)
@@ -989,7 +1204,6 @@ def run_ffmpeg(job_id: str, title: str, url: str, duration: int,
             "-i", url,
             "-t", str(duration),
             "-c", "copy",
-            "-movflags", "+faststart",
             str(partial_path)
         ]
 
@@ -1126,6 +1340,10 @@ def convert_capture_to_plex_movie(title: str, source_path: Path):
     if partial_path.exists():
         partial_path.unlink()
 
+    source_duration = probe_duration(source_path)
+    if source_duration is None or source_duration < 600:
+        raise RuntimeError(f"source duration could not be verified: {source_duration}")
+
     log.info(f"CONVERT START -> {title}")
     log.info(f"SOURCE -> {source_path}")
     log.info(f"OUTPUT -> {output_path}")
@@ -1136,7 +1354,6 @@ def convert_capture_to_plex_movie(title: str, source_path: Path):
         "-loglevel", "error",
         "-i", str(source_path),
         "-c", "copy",
-        "-movflags", "+faststart",
         str(partial_path),
     ]
 
@@ -1154,6 +1371,8 @@ def convert_capture_to_plex_movie(title: str, source_path: Path):
     duration = probe_duration(partial_path)
     if duration is None or duration < 60:
         raise RuntimeError("converted file duration could not be verified")
+    if duration < source_duration * MIN_DURATION_RATIO:
+        raise RuntimeError(f"converted file too short: {duration:.0f}s of source {source_duration:.0f}s")
 
     if output_path.exists():
         output_path.unlink()
@@ -1169,7 +1388,7 @@ def convert_capture_to_plex_movie(title: str, source_path: Path):
         except Exception as e:
             log.warning(f"CONVERT CLEANUP SKIPPED -> {ts_path} | {e}")
 
-    log.info(f"CONVERT DONE -> {title} | {output_path} | sources deleted: {len(deleted_sources)}")
+    log.info(f"CONVERT DONE -> {title} | {output_path} | {duration:.0f}s of {source_duration:.0f}s | sources deleted: {len(deleted_sources)}")
     return {
         "status": "done",
         "title": title,
@@ -1177,7 +1396,34 @@ def convert_capture_to_plex_movie(title: str, source_path: Path):
         "deleted_sources": deleted_sources,
         "file": str(output_path),
         "duration": duration,
+        "source_duration": source_duration,
     }
+
+
+def run_firetv_conversion(title: str):
+    source_path = find_fire_tv_capture(title)
+    if not source_path:
+        log.warning(f"CONVERT FIRETV MISS -> {title} | paths={FIRE_TV_PATHS}")
+        log_system_event(
+            "warn",
+            "conversion",
+            "Fire TV source file not found",
+            title=title,
+            details=f"paths={FIRE_TV_PATHS}",
+        )
+        raise FileNotFoundError(f"No matching .ts file found in {', '.join(FIRE_TV_PATHS)}")
+
+    log.info(f"CONVERT FIRETV START -> {title} | {source_path}")
+    result = convert_capture_to_plex_movie(title, source_path)
+    log.info(f"CONVERT FIRETV DONE -> {title} | {result.get('file')}")
+    log_system_event(
+        "info",
+        "conversion",
+        "Fire TV conversion completed",
+        title=title,
+        details=result.get("file"),
+    )
+    return result
 
 
 def probe_duration(path: Path):
@@ -1211,17 +1457,26 @@ def probe_duration(path: Path):
 
 if __name__ == "__main__":
     load_config()
+    load_runtime_settings()
 
     log.info("=" * 50)
     log.info("EPG Mac Recording Server starting...")
     log.info(f"Version         : {SERVER_VERSION}")
+    log.info(f"Config Path     : {CONFIG_PATH}")
+    log.info(f"Config Loaded   : {config_loaded}")
     log.info(f"NAS Movies Path : {NAS_MOVIES_PATH}")
     log.info(f"NAS TV Path     : {NAS_TV_PATH}")
+    log.info(f"Fire TV Paths   : {', '.join(FIRE_TV_PATHS)}")
     log.info(f"ffmpeg          : {FFMPEG_PATH}")
     log.info(f"Port            : {SERVER_PORT}")
     log.info(f"DB Path         : {DB_PATH}")
     log.info(f"DB Exists       : {Path(DB_PATH).exists()}")
+    log.info(f"Record Padding  : {RECORDING_PADDING_SECONDS}s")
+    log.info(f"Convert Safety  : {CONVERSION_RECORDING_SAFETY_SECONDS}s")
+    log.info(f"Min Duration    : {MIN_DURATION_RATIO:.2f}")
+    log.info(f"Min Bitrate     : {MIN_AVG_BITRATE_KBPS} kbps")
     log.info(f"Upcoming JSON   : {UPCOMING_JSON_PATH}")
+    log_recording_settings_status()
     log.info("=" * 50)
 
     if not Path(FFMPEG_PATH).exists():
@@ -1234,6 +1489,9 @@ if __name__ == "__main__":
 
     scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
     scheduler_thread.start()
+
+    conversion_thread = threading.Thread(target=conversion_queue_loop, daemon=True)
+    conversion_thread.start()
 
     app.run(
         host="0.0.0.0",

@@ -17,7 +17,13 @@ Public Module PlayerManager
     Private _isStartingStream As Boolean = False
     Private vlcProcess As Process = Nothing
 
-    Public Sub PlayStream(server As String, user As String, pass As String, channel As String, streamId As String)
+    Public Sub PlayStream(server As String,
+                          user As String,
+                          pass As String,
+                          channel As String,
+                          streamId As String,
+                          Optional guideTitle As String = "",
+                          Optional guideStartTime As DateTime? = Nothing)
 
         _isStartingStream = True
         Try
@@ -36,13 +42,14 @@ Public Module PlayerManager
         '---------------------------------------
         'StopStream()
 
-        Dim channelName = ""
-        Dim title = ""
-        Dim startTime As DateTime? = Nothing
+        Dim channelName = channel
+        Dim title = guideTitle
+        Dim startTime As DateTime? = guideStartTime
 
-        Dim connectionString As String = $"Data Source={_DbPath};Pooling=False;"
+        If String.IsNullOrWhiteSpace(title) OrElse Not startTime.HasValue Then
+            Dim connectionString As String = $"Data Source={_DbPath};Pooling=False;"
 
-        Dim sql = "
+            Dim sql = "
 SELECT c.nickname,
        g.title,
        g.start_utc
@@ -52,25 +59,26 @@ WHERE c.nickname = @channel
 AND strftime('%Y%m%d%H%M%S','now','localtime') BETWEEN g.start_utc AND g.end_utc
 LIMIT 1
 "
-        SyncLock GlobalState.DbLock
-            Using con As New SqliteConnection(connectionString)
-                con.Open()
+            SyncLock GlobalState.DbLock
+                Using con As New SqliteConnection(connectionString)
+                    con.Open()
 
-                Using cmd As New SqliteCommand(sql, con)
-                    cmd.Parameters.AddWithValue("@channel", channel)
+                    Using cmd As New SqliteCommand(sql, con)
+                        cmd.Parameters.AddWithValue("@channel", channel)
 
-                    Using reader = cmd.ExecuteReader()
-                        If reader.Read() Then
-                            channelName = reader("nickname").ToString()
-                            title = reader("title").ToString()
+                        Using reader = cmd.ExecuteReader()
+                            If reader.Read() Then
+                                channelName = reader("nickname").ToString()
+                                title = reader("title").ToString()
 
-                            Dim rawDate As String = reader("start_utc").ToString()
-                            startTime = DateTime.ParseExact(rawDate, "yyyyMMddHHmmss", Nothing)
-                        End If
+                                Dim rawDate As String = reader("start_utc").ToString()
+                                startTime = DateTime.ParseExact(rawDate, "yyyyMMddHHmmss", Nothing)
+                            End If
+                        End Using
                     End Using
                 End Using
-            End Using
-        End SyncLock
+            End SyncLock
+        End If
 
         Dim url = $"{server}/live/{user}/{pass}/{streamId}.m3u8"
 
@@ -90,27 +98,27 @@ LIMIT 1
         Dim timeText = If(startTime.HasValue, startTime.Value.ToString("hh:mm tt"), "No Time")
         Dim windowTitle = $"{displayChannel} | {displayTitle} | {timeText} | {streamId}"
 
-        Dim vlcPath As String = "C:\Program Files\VideoLAN\VLC\vlc.exe"
-
-        If Not IO.File.Exists(vlcPath) Then
-            MsgBox("VLC not found")
-            _isStartingStream = False
-            Exit Sub
-        End If
 #Region "VLC Launch (Dual Platform)"
 
         If GlobalState.CurrentTarget = ExecutionTarget.RemoteMac Then
             ' ============================================================
-            ' MAC → Single Instance (Maximum Stability)
+            ' MAC -> Fresh VLC instance with guide metadata.
             ' ============================================================
             Dim customUA As String = "VLC/3.0" ' Short & Clean
             Dim psi As New ProcessStartInfo()
             psi.FileName = "ssh"
 
-            ' REMOVED: -n flag (we are reusing the main VLC window now)
-            ' ADDED: --http-reconnect and --http-user-agent
-            ' This is the most reliable "Fire and Forget" string for PrimeStreams.
-            psi.Arguments = $"{GlobalState.MacUser}@{GlobalState.MacHost} open -a VLC --args --http-reconnect --http-user-agent=""{customUA}"" ""{url}"""
+            Dim remoteCommand =
+                "/usr/bin/pkill -x VLC >/dev/null 2>&1; " &
+                "/usr/bin/open -na VLC --args " &
+                "--http-reconnect " &
+                "--http-user-agent " & ShellQuote(customUA) & " " &
+                "--meta-title " & ShellQuote(windowTitle) & " " &
+                "--network-caching=1500 " &
+                ShellQuote(url)
+
+            psi.ArgumentList.Add($"{GlobalState.MacUser}@{GlobalState.MacHost}")
+            psi.ArgumentList.Add(remoteCommand)
 
             psi.UseShellExecute = False
             psi.CreateNoWindow = True
@@ -125,6 +133,7 @@ LIMIT 1
             ' ================================
             ' WINDOWS → existing behavior
             ' ================================
+            Dim vlcPath As String = "C:\Program Files\VideoLAN\VLC\vlc.exe"
             If Not IO.File.Exists(vlcPath) Then
                 MsgBox("VLC not found")
                 _isStartingStream = False
@@ -151,6 +160,11 @@ LIMIT 1
         _isStartingStream = False
 
     End Sub
+
+    Private Function ShellQuote(value As String) As String
+        Return "'" & value.Replace("'", "'""'""'") & "'"
+    End Function
+
     Private Function TestStream(url As String) As Boolean
 
         Try
