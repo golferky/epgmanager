@@ -6,19 +6,28 @@
 
 import json
 import logging
+import shlex
+import shutil
 import sqlite3
 import subprocess
 import threading
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, jsonify, request
 
+try:
+    from epgmanager_web import register_epgmanager_web
+except Exception:
+    register_epgmanager_web = None
+
 app = Flask(__name__)
 
 # --- CONFIG ------------------------------------------------
-SERVER_VERSION = "2026.06.04.1"
+SERVER_VERSION = "2026.06.15.1"
+SERVER_PROCESS_TITLE = "EPG Mac Server"
 NAS_MOVIES_PATH = "/Volumes/Plex/Movies"
 NAS_TV_PATH = "/Volumes/Plex/TV Shows"
 FIRE_TV_PATH = "/Volumes/Fire TV"
@@ -27,6 +36,12 @@ FFMPEG_PATH = "/opt/homebrew/bin/ffmpeg"
 SERVER_PORT = 5000
 LOG_PATH = "/Users/garyscudder/epg/logs/server.log"
 UPCOMING_JSON_PATH = "/Users/garyscudder/epg/upcoming.json"
+LOCAL_RECORDING_PATH = "/Users/garyscudder/epg/recording_temp"
+CONVERSION_QUEUE_JSON_PATH = "/Users/garyscudder/epg/convert_queue.json"
+GUIDE_IMPORT_COMMAND = ""
+AUTO_MOUNT_DB_SHARE = True
+DB_SHARE_URL = "smb://GarysNas/EPG"
+DB_MOUNT_RETRY_SECONDS = 60
 
 # Mount the GarysNas EPG share on the Mac so this path exists.
 DB_PATH = "/Volumes/EPG/Movies.db"
@@ -37,9 +52,14 @@ CONFIG_PATH = "/Users/garyscudder/epg/config.json"
 
 SCHEDULER_INTERVAL_SECONDS = 15
 STATUS_INTERVAL_SECONDS = 30
+STATUS_EVENT_INTERVAL_SECONDS = 60
+LOCK_WARNING_INTERVAL_SECONDS = 300
 CLAIM_WINDOW_SECONDS = 60
 RECORDING_PADDING_SECONDS = 120
 CONVERSION_RECORDING_SAFETY_SECONDS = 15 * 60
+GUIDE_IMPORT_RECORDING_SAFETY_SECONDS = 30 * 60
+GUIDE_IMPORT_AUTO_ENABLED = True
+GUIDE_IMPORT_DAILY_TIME = "05:00"
 MIN_DURATION_RATIO = 0.85
 MIN_AVG_BITRATE_KBPS = 1200
 # ----------------------------------------------------------
@@ -56,6 +76,11 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+if register_epgmanager_web:
+    register_epgmanager_web(app)
+else:
+    log.warning("epgmanager_web module not available; web dashboard disabled")
+
 # --- JOB STORE --------------------------------------------
 jobs = {}
 jobs_lock = threading.Lock()
@@ -64,8 +89,22 @@ active_conversion = None
 conversion_queue = []
 conversion_queue_history = []
 conversion_queue_lock = threading.Lock()
+pending_system_events = []
+pending_system_events_lock = threading.Lock()
 stop_scheduler = threading.Event()
 config_loaded = False
+last_db_mount_attempt = 0
+last_lock_warning = {}
+guide_import_lock = threading.Lock()
+guide_import_state = {
+    "status": "idle",
+    "requested": False,
+    "started_at": None,
+    "finished_at": None,
+    "last_error": None,
+    "last_output": None,
+    "pid": None,
+}
 
 
 # =========================================================
@@ -74,7 +113,8 @@ config_loaded = False
 
 def load_config():
     global DB_PATH
-    global NAS_MOVIES_PATH, NAS_TV_PATH, FIRE_TV_PATH, FIRE_TV_PATHS, FFMPEG_PATH, SERVER_PORT, UPCOMING_JSON_PATH
+    global NAS_MOVIES_PATH, NAS_TV_PATH, FIRE_TV_PATH, FIRE_TV_PATHS, FFMPEG_PATH, SERVER_PORT, UPCOMING_JSON_PATH, LOCAL_RECORDING_PATH, CONVERSION_QUEUE_JSON_PATH
+    global GUIDE_IMPORT_COMMAND, AUTO_MOUNT_DB_SHARE, DB_SHARE_URL, DB_MOUNT_RETRY_SECONDS
     global config_loaded
 
     path = Path(CONFIG_PATH)
@@ -101,6 +141,12 @@ def load_config():
                 NAS_TV_PATH = str(movies_path.parent / "TV Shows")
         FFMPEG_PATH = first_config_value(data, "FFMPEG_PATH", "ffmpeg_path", default=FFMPEG_PATH)
         UPCOMING_JSON_PATH = first_config_value(data, "UPCOMING_JSON_PATH", "upcoming_json_path", default=UPCOMING_JSON_PATH)
+        LOCAL_RECORDING_PATH = first_config_value(data, "LOCAL_RECORDING_PATH", "local_recording_path", "recording_temp_path", default=LOCAL_RECORDING_PATH)
+        CONVERSION_QUEUE_JSON_PATH = first_config_value(data, "CONVERSION_QUEUE_JSON_PATH", "conversion_queue_json_path", "convert_queue_json_path", default=CONVERSION_QUEUE_JSON_PATH)
+        GUIDE_IMPORT_COMMAND = first_config_value(data, "GUIDE_IMPORT_COMMAND", "guide_import_command", default=GUIDE_IMPORT_COMMAND)
+        DB_SHARE_URL = first_config_value(data, "DB_SHARE_URL", "db_share_url", "EPG_SHARE_URL", "epg_share_url", default=DB_SHARE_URL)
+        AUTO_MOUNT_DB_SHARE = bool_config_value(first_config_value(data, "AUTO_MOUNT_DB_SHARE", "auto_mount_db_share", default=AUTO_MOUNT_DB_SHARE))
+        DB_MOUNT_RETRY_SECONDS = int(first_config_value(data, "DB_MOUNT_RETRY_SECONDS", "db_mount_retry_seconds", default=DB_MOUNT_RETRY_SECONDS))
 
         port = first_config_value(data, "SERVER_PORT", "server_port", "MAC_PORT", "mac_port", default=SERVER_PORT)
         SERVER_PORT = int(port)
@@ -117,6 +163,64 @@ def first_config_value(data: dict, *keys, default=""):
     return default
 
 
+def bool_config_value(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "on")
+    return bool(value)
+
+
+def ensure_db_mounted(reason: str = "startup", force: bool = False) -> bool:
+    global last_db_mount_attempt
+
+    db_path = Path(DB_PATH)
+    if db_path.exists():
+        return True
+
+    if not AUTO_MOUNT_DB_SHARE:
+        log.warning(f"DB not found and auto-mount disabled: {DB_PATH}")
+        return False
+
+    now = time.time()
+    if not force and now - last_db_mount_attempt < DB_MOUNT_RETRY_SECONDS:
+        return False
+    last_db_mount_attempt = now
+
+    if not DB_SHARE_URL:
+        log.warning(f"DB not found and DB share URL is empty: {DB_PATH}")
+        return False
+
+    log.warning(f"DB not found: {DB_PATH}; attempting mount {DB_SHARE_URL} ({reason})")
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", f'mount volume "{DB_SHARE_URL}"'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            log.warning(f"DB mount failed -> {err}")
+            return False
+
+        for _ in range(20):
+            if db_path.exists():
+                log.info(f"DB mount ready -> {DB_PATH}")
+                log_system_event("info", "startup", "Movies DB share mounted", details=DB_SHARE_URL)
+                return True
+            time.sleep(0.5)
+
+        log.warning(f"DB mount command completed but DB still not found: {DB_PATH}")
+        return False
+    except Exception as e:
+        log.warning(f"DB mount attempt error -> {e}")
+        return False
+
+
 def db_connect():
     con = sqlite3.connect(DB_PATH, timeout=30)
     con.row_factory = sqlite3.Row
@@ -124,8 +228,43 @@ def db_connect():
     return con
 
 
+def db_connect_quick(timeout_seconds: float = 5.0):
+    con = sqlite3.connect(DB_PATH, timeout=timeout_seconds)
+    con.row_factory = sqlite3.Row
+    con.execute(f"PRAGMA busy_timeout={int(timeout_seconds * 1000)}")
+    return con
+
+
 def is_sqlite_locked_error(err: Exception) -> bool:
     return isinstance(err, sqlite3.OperationalError) and "database is locked" in str(err).lower()
+
+
+def should_log_lock_warning(key: str) -> bool:
+    now = time.time()
+    last = last_lock_warning.get(key, 0)
+    if now - last < LOCK_WARNING_INTERVAL_SECONDS:
+        return False
+    last_lock_warning[key] = now
+    return True
+
+
+def set_server_process_title():
+    try:
+        import setproctitle
+        setproctitle.setproctitle(SERVER_PROCESS_TITLE)
+        log.info(f"Process Title   : {SERVER_PROCESS_TITLE}")
+    except ImportError:
+        log.info("Process Title   : default python3 (install setproctitle to rename in Activity Monitor)")
+    except Exception as e:
+        log.warning(f"Process title unavailable -> {e}")
+
+
+def ffmpeg_process_label(kind: str, title: str, episode_code: str = "") -> str:
+    label = clean_filename(f"epg-{kind}-{title} {episode_code}".strip())
+    label = "_".join(label.split())
+    if len(label) > 63:
+        label = label[:63]
+    return label or f"epg-{kind}"
 
 
 def parse_db_time(value: str) -> datetime:
@@ -160,12 +299,17 @@ def load_app_settings(*keys):
 
 
 def load_runtime_settings():
-    global RECORDING_PADDING_SECONDS, CONVERSION_RECORDING_SAFETY_SECONDS, MIN_DURATION_RATIO, MIN_AVG_BITRATE_KBPS
+    global RECORDING_PADDING_SECONDS, CONVERSION_RECORDING_SAFETY_SECONDS, GUIDE_IMPORT_RECORDING_SAFETY_SECONDS
+    global GUIDE_IMPORT_AUTO_ENABLED, GUIDE_IMPORT_DAILY_TIME
+    global MIN_DURATION_RATIO, MIN_AVG_BITRATE_KBPS
 
     try:
         settings = load_app_settings(
             "recording_padding_seconds",
             "conversion_recording_safety_seconds",
+            "guide_import_recording_safety_seconds",
+            "guide_import_auto_enabled",
+            "guide_import_daily_time",
             "min_duration_ratio",
             "min_avg_bitrate_kbps",
         )
@@ -175,6 +319,9 @@ def load_runtime_settings():
 
     RECORDING_PADDING_SECONDS = parse_int_setting(settings, "recording_padding_seconds", RECORDING_PADDING_SECONDS)
     CONVERSION_RECORDING_SAFETY_SECONDS = parse_int_setting(settings, "conversion_recording_safety_seconds", CONVERSION_RECORDING_SAFETY_SECONDS)
+    GUIDE_IMPORT_RECORDING_SAFETY_SECONDS = parse_int_setting(settings, "guide_import_recording_safety_seconds", GUIDE_IMPORT_RECORDING_SAFETY_SECONDS)
+    GUIDE_IMPORT_AUTO_ENABLED = bool_config_value(settings.get("guide_import_auto_enabled", GUIDE_IMPORT_AUTO_ENABLED))
+    GUIDE_IMPORT_DAILY_TIME = parse_daily_time_setting(settings.get("guide_import_daily_time", GUIDE_IMPORT_DAILY_TIME), GUIDE_IMPORT_DAILY_TIME)
     MIN_DURATION_RATIO = parse_float_setting(settings, "min_duration_ratio", MIN_DURATION_RATIO)
     MIN_AVG_BITRATE_KBPS = parse_int_setting(settings, "min_avg_bitrate_kbps", MIN_AVG_BITRATE_KBPS)
 
@@ -198,6 +345,19 @@ def parse_float_setting(settings: dict, key: str, default: float) -> float:
         return float(value)
     except Exception:
         log.warning(f"Invalid numeric app_setting {key}={settings.get(key)!r}; using {default}")
+        return default
+
+
+def parse_daily_time_setting(value, default: str) -> str:
+    if value in (None, ""):
+        return default
+
+    text = str(value).strip()
+    try:
+        datetime.strptime(text, "%H:%M")
+        return text
+    except Exception:
+        log.warning(f"Invalid guide_import_daily_time={text!r}; using {default}")
         return default
 
 
@@ -414,30 +574,68 @@ def log_system_event(
     title: str = None,
     details: str = None,
 ):
+    event = {
+        "level": level,
+        "category": category,
+        "job_id": job_id,
+        "recording_id": recording_id,
+        "channel": channel,
+        "title": title,
+        "message": message,
+        "details": details,
+    }
     try:
-        with db_connect() as con:
-            ensure_system_events_table(con)
-            con.execute(
-                """
-                INSERT INTO system_events
-                    (source, level, category, job_id, recording_id, channel, title, message, details)
-                VALUES
-                    ('mac_server', @level, @category, @job_id, @recording_id, @channel, @title, @message, @details)
-                """,
-                {
-                    "level": level,
-                    "category": category,
-                    "job_id": job_id,
-                    "recording_id": recording_id,
-                    "channel": channel,
-                    "title": title,
-                    "message": message,
-                    "details": details,
-                },
-            )
-            con.commit()
+        write_system_events([event])
+        flush_pending_system_events()
     except Exception as e:
-        log.warning(f"system event write skipped -> {e}")
+        queue_pending_system_event(event)
+        if is_sqlite_locked_error(e):
+            if should_log_lock_warning("system_events"):
+                log.info("system event write deferred -> database is busy; buffered for retry")
+        else:
+            log.warning(f"system event write skipped -> {e}")
+
+
+def queue_pending_system_event(event: dict):
+    with pending_system_events_lock:
+        pending_system_events.append(dict(event))
+        if len(pending_system_events) > 500:
+            del pending_system_events[: len(pending_system_events) - 500]
+
+
+def pending_system_event_count() -> int:
+    with pending_system_events_lock:
+        return len(pending_system_events)
+
+
+def flush_pending_system_events():
+    with pending_system_events_lock:
+        if not pending_system_events:
+            return
+        events = [dict(event) for event in pending_system_events]
+
+    try:
+        write_system_events(events)
+        with pending_system_events_lock:
+            del pending_system_events[: len(events)]
+        log.info(f"system events flushed -> {len(events)}")
+    except Exception:
+        return
+
+
+def write_system_events(events):
+    with db_connect_quick() as con:
+        ensure_system_events_table(con)
+        con.executemany(
+            """
+            INSERT INTO system_events
+                (source, level, category, job_id, recording_id, channel, title, message, details)
+            VALUES
+                ('mac_server', @level, @category, @job_id, @recording_id, @channel, @title, @message, @details)
+            """,
+            events,
+        )
+        con.commit()
 
 
 def fetch_upcoming_rows(limit=50):
@@ -530,6 +728,7 @@ def ping():
         "time": datetime.now().isoformat(),
         "db_path": DB_PATH,
         "db_exists": Path(DB_PATH).exists(),
+        "pending_system_events": pending_system_event_count(),
         "active_jobs": len([j for j in jobs.values() if j["status"] == "recording"])
     })
 
@@ -630,7 +829,8 @@ def convert_firetv():
         if not title:
             return jsonify({"error": "Missing field: title"}), 400
 
-        if bool(data.get("queue")):
+        queue_requested = bool(data.get("queue", True))
+        if queue_requested:
             item, added = enqueue_firetv_conversion(title)
             status_code = 202 if added else 200
             return jsonify({
@@ -682,6 +882,80 @@ def convert_firetv():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/convert_plex_ts", methods=["POST"])
+def convert_plex_ts():
+    """
+    POST /convert_plex_ts
+    Body: { title, source_path, queue }
+    Converts a specific Plex-root .ts capture into a clean Plex movie .mp4.
+    The .ts source is deleted only after ffmpeg and ffprobe both succeed.
+    """
+    try:
+        data = request.get_json() or {}
+        title = (data.get("title") or "").strip()
+        source_path = (data.get("source_path") or "").strip()
+        if not title:
+            return jsonify({"error": "Missing field: title"}), 400
+        if not source_path:
+            return jsonify({"error": "Missing field: source_path"}), 400
+
+        source = Path(source_path)
+        if source.suffix.lower() != ".ts":
+            return jsonify({"error": "source_path must be a .ts file", "source_path": source_path}), 400
+        if not source.exists():
+            return jsonify({"error": "source_path not found", "source_path": source_path}), 404
+
+        queue_requested = bool(data.get("queue", True))
+        if queue_requested:
+            item, added = enqueue_conversion(title, source_path=str(source), source_kind="plex_ts")
+            status_code = 202 if added else 200
+            return jsonify({
+                "status": "queued" if added else item.get("status", "queued"),
+                "queued": added,
+                "item": item,
+                "queue": conversion_queue_snapshot(),
+            }), status_code
+
+        guard = conversion_start_guard(title)
+        if guard:
+            log_system_event(
+                "warn",
+                "conversion",
+                guard.get("error", "Plex TS conversion deferred"),
+                title=title,
+                details=json.dumps(guard),
+            )
+            return jsonify(guard), 409
+
+        if not conversion_lock.acquire(blocking=False):
+            log_system_event(
+                "warn",
+                "conversion",
+                "Plex TS conversion already running",
+                title=title,
+                details=f"active_title={active_conversion}",
+            )
+            return jsonify({"error": "conversion already running", "active_title": active_conversion}), 409
+
+        set_active_conversion(title)
+        try:
+            result = run_plex_ts_conversion(title, source)
+            return jsonify(result)
+        finally:
+            set_active_conversion(None)
+            conversion_lock.release()
+    except Exception as e:
+        log.error(f"POST /convert_plex_ts error -> {e}")
+        log_system_event(
+            "error",
+            "conversion",
+            "Plex TS conversion failed",
+            title=title if "title" in locals() else None,
+            details=str(e),
+        )
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/convert_queue")
 def convert_queue_status():
     return jsonify(conversion_queue_snapshot())
@@ -692,15 +966,21 @@ def clear_convert_queue():
     removed = []
     with conversion_queue_lock:
         keep = []
+        finished_at = datetime.now().isoformat()
         for item in conversion_queue:
             if item.get("status") == "running":
                 keep.append(item)
             else:
-                removed.append(dict(item))
+                cleared = dict(item)
+                cleared["status"] = "cleared"
+                cleared["finished_at"] = finished_at
+                cleared["message"] = "cleared by user"
+                removed.append(cleared)
         conversion_queue[:] = keep
         if removed:
             conversion_queue_history.extend(removed[-50:])
             del conversion_queue_history[:-50]
+        save_conversion_queue_unlocked()
 
     log.info(f"CONVERT QUEUE CLEARED -> {len(removed)} waiting item(s) removed")
     log_system_event("warn", "conversion", "Fire TV conversion queue cleared", details=f"removed={len(removed)}")
@@ -709,6 +989,81 @@ def clear_convert_queue():
         "removed": len(removed),
         "queue": conversion_queue_snapshot(),
     })
+
+
+@app.route("/guide_import", methods=["POST"])
+def request_guide_import():
+    """
+    POST /guide_import
+    Body: { force }
+    Queues a Mac-side guide import. The worker starts it only when recordings are clear.
+    """
+    data = request.get_json(silent=True) or {}
+    force = bool(data.get("force"))
+
+    queued = queue_guide_import(force=force, source="manual")
+    status_code = 202 if queued else 200
+    return jsonify(guide_import_snapshot()), status_code
+
+
+def queue_guide_import(force: bool = False, source: str = "manual") -> bool:
+    with guide_import_lock:
+        if guide_import_state["status"] == "running":
+            return False
+
+        guide_import_state.update({
+            "status": "waiting",
+            "requested": True,
+            "force": force,
+            "source": source,
+            "started_at": None,
+            "finished_at": None,
+            "last_error": None,
+            "last_output": None,
+            "pid": None,
+        })
+
+    log.info(f"GUIDE IMPORT REQUESTED -> source={source} | force={force}")
+    log_system_event("info", "guide_import", "Guide import requested", details=f"source={source}; force={force}")
+    return True
+
+
+@app.route("/guide_import/status")
+def guide_import_status():
+    return jsonify(guide_import_snapshot())
+
+
+@app.route("/guide_import/cancel", methods=["POST"])
+def cancel_guide_import():
+    with guide_import_lock:
+        status = guide_import_state.get("status")
+        pid = guide_import_state.get("pid")
+
+        if status == "running" and pid:
+            return jsonify({
+                "error": "guide import is running; stop the importer process manually if cancellation is required",
+                "pid": pid,
+                "status": status,
+            }), 409
+
+        if status not in ("waiting", "failed", "done"):
+            return jsonify(guide_import_snapshot())
+
+        guide_import_state.update({
+            "status": "idle",
+            "requested": False,
+            "force": False,
+            "source": None,
+            "started_at": None,
+            "finished_at": datetime.now().isoformat(),
+            "last_error": None,
+            "last_output": "cancelled/reset",
+            "pid": None,
+        })
+
+    log.info("GUIDE IMPORT RESET -> idle")
+    log_system_event("warn", "guide_import", "Guide import reset", details="waiting state cancelled")
+    return jsonify(guide_import_snapshot())
 
 
 @app.route("/cancel/<job_id>", methods=["POST"])
@@ -831,11 +1186,22 @@ def upcoming_html():
 def scheduler_loop():
     log.info("DB scheduler loop started")
     last_status_log = 0
+    last_status_event_log = 0
+    import_pause_logged = False
 
     while not stop_scheduler.is_set():
         try:
+            import_status = guide_import_snapshot().get("status", "idle")
+            if import_status == "running":
+                if not import_pause_logged:
+                    log.info("scheduler paused while guide import is running")
+                    import_pause_logged = True
+                stop_scheduler.wait(SCHEDULER_INTERVAL_SECONDS)
+                continue
+            import_pause_logged = False
+
             if not Path(DB_PATH).exists():
-                log.warning(f"DB not found: {DB_PATH}")
+                ensure_db_mounted("scheduler")
                 if not getattr(scheduler_loop, "_db_missing_logged", False):
                     log_system_event("warn", "db", "Movies DB path not found", details=DB_PATH)
                     scheduler_loop._db_missing_logged = True
@@ -846,7 +1212,8 @@ def scheduler_loop():
                     start_due_recording(item)
         except sqlite3.OperationalError as e:
             if is_sqlite_locked_error(e):
-                log.warning("scheduler DB busy; Windows import likely has the lock, will retry")
+                if should_log_lock_warning("scheduler"):
+                    log.info("scheduler DB busy; will retry")
             else:
                 log.error(f"scheduler loop error -> {e}")
                 log_system_event("error", "scheduler", "Scheduler database error", details=str(e))
@@ -856,7 +1223,11 @@ def scheduler_loop():
 
         now = time.time()
         if now - last_status_log >= STATUS_INTERVAL_SECONDS:
-            log_runtime_status()
+            flush_pending_system_events()
+            status_text = log_runtime_status()
+            if now - last_status_event_log >= STATUS_EVENT_INTERVAL_SECONDS:
+                log_system_event("info", "status", "Runtime status", details=status_text)
+                last_status_event_log = now
             last_status_log = now
 
         stop_scheduler.wait(SCHEDULER_INTERVAL_SECONDS)
@@ -880,6 +1251,8 @@ def log_runtime_status():
     with conversion_queue_lock:
         queued_count = sum(1 for item in conversion_queue if item.get("status") in ("queued", "deferred"))
 
+    import_status = guide_import_snapshot().get("status", "idle")
+
     parts = []
     if recording_titles:
         parts.append("recording: " + ", ".join(recording_titles[:4]))
@@ -894,7 +1267,10 @@ def log_runtime_status():
         parts.append("converting: none")
 
     parts.append(f"conversion queue: {queued_count}")
-    log.info("STATUS -> " + " | ".join(parts))
+    parts.append(f"guide import: {import_status}")
+    status_text = " | ".join(parts)
+    log.info("STATUS -> " + status_text)
+    return status_text
 
 
 def conversion_queue_snapshot():
@@ -911,21 +1287,85 @@ def conversion_queue_snapshot():
         "queued_count": waiting_count,
         "queued": queued,
         "recent": history,
+        "pending_system_events": pending_system_event_count(),
     }
 
 
-def enqueue_firetv_conversion(title: str):
+def save_conversion_queue_unlocked():
+    path = Path(CONVERSION_QUEUE_JSON_PATH)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "saved_at": datetime.now().isoformat(),
+            "queued": conversion_queue,
+            "recent": conversion_queue_history[-50:],
+        }
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
+    except Exception as e:
+        log.warning(f"CONVERT QUEUE SAVE SKIPPED -> {e}")
+
+
+def load_conversion_queue():
+    path = Path(CONVERSION_QUEUE_JSON_PATH)
+    if not path.exists():
+        return
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        queued = payload.get("queued", [])
+        recent = payload.get("recent", [])
+        restored = []
+
+        for item in queued:
+            if not isinstance(item, dict):
+                continue
+            title = item.get("title")
+            if not title:
+                continue
+            status = item.get("status", "queued")
+            if status not in ("queued", "deferred", "running"):
+                continue
+            item["status"] = "queued"
+            item["started_at"] = None
+            item["finished_at"] = None
+            if status == "running":
+                item["message"] = "restored after server restart"
+            restored.append(item)
+
+        with conversion_queue_lock:
+            conversion_queue[:] = restored
+            conversion_queue_history[:] = [dict(item) for item in recent[-50:] if isinstance(item, dict)]
+            save_conversion_queue_unlocked()
+
+        if restored:
+            log.info(f"CONVERT QUEUE RESTORED -> {len(restored)} item(s)")
+    except Exception as e:
+        log.warning(f"CONVERT QUEUE RESTORE SKIPPED -> {e}")
+
+
+def enqueue_conversion(title: str, source_path: str = None, source_kind: str = "firetv"):
     now = datetime.now().isoformat()
     norm = normalize_title(title)
+    source_path = str(source_path or "")
+    source_kind = source_kind or "firetv"
 
     with conversion_queue_lock:
         for item in conversion_queue:
-            if normalize_title(item.get("title", "")) == norm and item.get("status") in ("queued", "deferred"):
+            if (
+                normalize_title(item.get("title", "")) == norm
+                and item.get("source_path", "") == source_path
+                and item.get("source_kind", "firetv") == source_kind
+                and item.get("status") in ("queued", "deferred")
+            ):
                 return item, False
 
         item = {
             "id": f"conv_{int(time.time())}_{len(conversion_queue) + 1}",
             "title": title,
+            "source_kind": source_kind,
+            "source_path": source_path,
             "status": "queued",
             "queued_at": now,
             "started_at": None,
@@ -933,10 +1373,15 @@ def enqueue_firetv_conversion(title: str):
             "message": None,
         }
         conversion_queue.append(item)
+        save_conversion_queue_unlocked()
 
-    log.info(f"CONVERT QUEUED -> {title}")
-    log_system_event("info", "conversion", "Fire TV conversion queued", title=title)
+    log.info(f"CONVERT QUEUED -> {title} | {source_kind}")
+    log_system_event("info", "conversion", "Conversion queued", title=title, details=f"source_kind={source_kind}; source_path={source_path}")
     return item, True
+
+
+def enqueue_firetv_conversion(title: str):
+    return enqueue_conversion(title, source_kind="firetv")
 
 
 def update_conversion_queue_item(item, status: str, message: str = None):
@@ -947,6 +1392,7 @@ def update_conversion_queue_item(item, status: str, message: str = None):
             item["started_at"] = datetime.now().isoformat()
         if status in ("done", "failed"):
             item["finished_at"] = datetime.now().isoformat()
+        save_conversion_queue_unlocked()
 
 
 def finish_conversion_queue_item(item):
@@ -955,6 +1401,7 @@ def finish_conversion_queue_item(item):
             conversion_queue.remove(item)
         conversion_queue_history.append(dict(item))
         del conversion_queue_history[:-50]
+        save_conversion_queue_unlocked()
 
 
 def conversion_queue_loop():
@@ -985,11 +1432,14 @@ def conversion_queue_loop():
         set_active_conversion(title)
         update_conversion_queue_item(item, "running")
         try:
-            result = run_firetv_conversion(title)
+            if item.get("source_kind") == "plex_ts":
+                result = run_plex_ts_conversion(title, Path(item.get("source_path", "")))
+            else:
+                result = run_firetv_conversion(title)
             update_conversion_queue_item(item, "done", result.get("file"))
         except Exception as e:
             log.error(f"CONVERT QUEUE FAILED -> {title} | {e}")
-            log_system_event("error", "conversion", "Queued Fire TV conversion failed", title=title, details=str(e))
+            log_system_event("error", "conversion", "Queued conversion failed", title=title, details=str(e))
             update_conversion_queue_item(item, "failed", str(e))
         finally:
             set_active_conversion(None)
@@ -997,6 +1447,191 @@ def conversion_queue_loop():
             finish_conversion_queue_item(item)
 
         stop_scheduler.wait(3)
+
+
+def guide_import_snapshot():
+    with guide_import_lock:
+        return dict(guide_import_state)
+
+
+def guide_import_start_guard(force: bool = False):
+    if force:
+        return None
+
+    active_titles = active_recording_titles()
+    if active_titles:
+        return {
+            "error": "recording active; guide import deferred",
+            "active_recordings": active_titles,
+        }
+
+    next_row = next_scheduled_recording_within(GUIDE_IMPORT_RECORDING_SAFETY_SECONDS)
+    if next_row:
+        return {
+            "error": "recording starts soon; guide import deferred",
+            "next_recording": {
+                "id": next_row["id"],
+                "title": next_row["title"],
+                "start_time": next_row["start_time"],
+            },
+            "safety_seconds": GUIDE_IMPORT_RECORDING_SAFETY_SECONDS,
+        }
+
+    return None
+
+
+def guide_import_loop():
+    log.info("Guide import worker loop started")
+
+    while not stop_scheduler.is_set():
+        snapshot = guide_import_snapshot()
+        if snapshot.get("status") != "waiting":
+            stop_scheduler.wait(10)
+            continue
+
+        force = bool(snapshot.get("force"))
+        guard = guide_import_start_guard(force)
+        if guard:
+            with guide_import_lock:
+                guide_import_state["last_error"] = guard.get("error")
+                guide_import_state["last_output"] = json.dumps(guard)
+            stop_scheduler.wait(60)
+            continue
+
+        run_guide_import_command()
+        stop_scheduler.wait(5)
+
+
+def guide_import_daily_scheduler_loop():
+    log.info(f"Guide import daily scheduler started -> enabled={GUIDE_IMPORT_AUTO_ENABLED}, time={GUIDE_IMPORT_DAILY_TIME}")
+    last_requested_date = None
+
+    while not stop_scheduler.is_set():
+        try:
+            if not GUIDE_IMPORT_AUTO_ENABLED:
+                stop_scheduler.wait(60)
+                continue
+
+            now = datetime.now()
+            target_time = datetime.strptime(GUIDE_IMPORT_DAILY_TIME, "%H:%M").time()
+            if now.time() >= target_time and last_requested_date != now.date():
+                if queue_guide_import(force=False, source="daily_auto"):
+                    last_requested_date = now.date()
+                    log.info(f"GUIDE IMPORT DAILY QUEUED -> {now.date()} at {GUIDE_IMPORT_DAILY_TIME}")
+                    log_system_event(
+                        "info",
+                        "guide_import",
+                        "Daily guide import queued",
+                        details=f"date={now.date()}; target_time={GUIDE_IMPORT_DAILY_TIME}",
+                    )
+                else:
+                    snapshot = guide_import_snapshot()
+                    if snapshot.get("status") in ("running", "waiting"):
+                        last_requested_date = now.date()
+                        log.info(f"GUIDE IMPORT DAILY ALREADY ACTIVE -> {snapshot.get('status')}")
+
+            stop_scheduler.wait(60)
+        except Exception as e:
+            log.error(f"guide import daily scheduler error -> {e}")
+            log_system_event("error", "guide_import", "Daily guide import scheduler error", details=str(e))
+            stop_scheduler.wait(300)
+
+
+def run_guide_import_command():
+    if not GUIDE_IMPORT_COMMAND:
+        message = "GUIDE_IMPORT_COMMAND is not configured"
+        log.warning(f"GUIDE IMPORT SKIPPED -> {message}")
+        with guide_import_lock:
+            guide_import_state.update({
+                "status": "failed",
+                "finished_at": datetime.now().isoformat(),
+                "last_error": message,
+                "last_output": None,
+                "pid": None,
+            })
+        log_system_event("error", "guide_import", "Guide import command missing", details=message)
+        return
+
+    command = shlex.split(GUIDE_IMPORT_COMMAND)
+    with guide_import_lock:
+        guide_import_state.update({
+            "status": "running",
+            "started_at": datetime.now().isoformat(),
+            "finished_at": None,
+            "last_error": None,
+            "last_output": None,
+            "pid": None,
+        })
+
+    started = time.time()
+    log.info(f"GUIDE IMPORT START -> {GUIDE_IMPORT_COMMAND}")
+    log_system_event("info", "guide_import", "Guide import started", details=GUIDE_IMPORT_COMMAND)
+
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        with guide_import_lock:
+            guide_import_state["pid"] = proc.pid
+
+        output_lines = []
+        for raw_line in proc.stdout:
+            line = raw_line.rstrip()
+            if not line:
+                continue
+
+            output_lines.append(line)
+            output = "\n".join(output_lines)
+            if len(output) > 8000:
+                output = output[-8000:]
+                output_lines = output.splitlines()
+
+            with guide_import_lock:
+                guide_import_state["last_output"] = output
+
+            log.info(f"GUIDE IMPORT -> {line}")
+
+        proc.wait()
+        output = "\n".join(output_lines).strip()
+        elapsed = time.time() - started
+
+        if proc.returncode == 0:
+            log.info(f"GUIDE IMPORT DONE -> {elapsed / 60:.1f} min | {len(output_lines)} output lines")
+            with guide_import_lock:
+                guide_import_state.update({
+                    "status": "done",
+                    "finished_at": datetime.now().isoformat(),
+                    "last_error": None,
+                    "last_output": output,
+                    "pid": None,
+                })
+            log_system_event("info", "guide_import", "Guide import completed", details=output[-1000:] if output else None)
+        else:
+            message = f"guide import exited with code {proc.returncode}"
+            log.error(f"GUIDE IMPORT FAILED -> {message} | {elapsed / 60:.1f} min")
+            with guide_import_lock:
+                guide_import_state.update({
+                    "status": "failed",
+                    "finished_at": datetime.now().isoformat(),
+                    "last_error": message,
+                    "last_output": output,
+                    "pid": None,
+                })
+            log_system_event("error", "guide_import", message, details=output[-1000:] if output else None)
+    except Exception as e:
+        log.error(f"GUIDE IMPORT FAILED -> {e}")
+        with guide_import_lock:
+            guide_import_state.update({
+                "status": "failed",
+                "finished_at": datetime.now().isoformat(),
+                "last_error": str(e),
+                "pid": None,
+            })
+        log_system_event("error", "guide_import", "Guide import failed", details=str(e))
 
 
 def active_recording_titles():
@@ -1025,6 +1660,14 @@ def next_scheduled_recording_within(seconds: int):
 
 
 def conversion_start_guard(title: str):
+    import_status = guide_import_snapshot().get("status", "idle")
+    if import_status == "running":
+        return {
+            "error": "guide import active; conversion deferred",
+            "title": title,
+            "guide_import_status": import_status,
+        }
+
     active_titles = active_recording_titles()
     if active_titles:
         return None
@@ -1183,8 +1826,11 @@ def run_ffmpeg(job_id: str, title: str, url: str, duration: int,
 
         folder.mkdir(parents=True, exist_ok=True)
         output_path = folder / f"{safe_name}.mp4"
-        partial_path = folder / f"{safe_name}.part.mp4"
-        ffmpeg_log_path = folder / f"{safe_name}.ffmpeg.log"
+        nas_partial_path = folder / f"{safe_name}.part.mp4"
+        local_job_folder = Path(LOCAL_RECORDING_PATH) / job_id
+        local_job_folder.mkdir(parents=True, exist_ok=True)
+        partial_path = local_job_folder / f"{safe_name}.part.mp4"
+        ffmpeg_log_path = local_job_folder / f"{safe_name}.ffmpeg.log"
 
         log.info(f"FFMPEG START -> {job_id} | {title}")
         log.info(f"OUTPUT -> {output_path}")
@@ -1192,8 +1838,13 @@ def run_ffmpeg(job_id: str, title: str, url: str, duration: int,
         if partial_path.exists():
             partial_path.unlink()
 
+        process_label = ffmpeg_process_label(
+            "record",
+            clean_series_title(title) if is_series else title,
+            ep_code if is_series else "",
+        )
         cmd = [
-            FFMPEG_PATH,
+            process_label,
             "-y",
             "-loglevel", "error",
             "-reconnect", "1",
@@ -1207,7 +1858,8 @@ def run_ffmpeg(job_id: str, title: str, url: str, duration: int,
             str(partial_path)
         ]
 
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        log.info(f"FFMPEG PROCESS -> {process_label}")
+        proc = subprocess.Popen(cmd, executable=FFMPEG_PATH, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         with jobs_lock:
             jobs[job_id]["pid"] = proc.pid
@@ -1233,9 +1885,17 @@ def run_ffmpeg(job_id: str, title: str, url: str, duration: int,
                 if avg_bitrate_kbps < MIN_AVG_BITRATE_KBPS:
                     raise Exception(f"recording bitrate too low: {avg_bitrate_kbps:.0f} kbps")
 
+                if nas_partial_path.exists():
+                    nas_partial_path.unlink()
+                shutil.copy2(partial_path, nas_partial_path)
                 if output_path.exists():
                     output_path.unlink()
-                partial_path.rename(output_path)
+                nas_partial_path.rename(output_path)
+                try:
+                    partial_path.unlink()
+                    local_job_folder.rmdir()
+                except Exception as e:
+                    log.warning(f"LOCAL RECORDING CLEANUP SKIPPED -> {local_job_folder} | {e}")
                 size_gb = output_path.stat().st_size / 1e9
                 duration_msg = f"{actual_duration:.0f}s" if actual_duration is not None else "unknown duration"
                 log.info(f"COMPLETED -> {job_id} | {title} | {size_gb:.2f}GB | {duration_msg} | {avg_bitrate_kbps:.0f} kbps")
@@ -1286,6 +1946,8 @@ def normalize_title(name: str) -> str:
     import re
     path = Path(name)
     stem = path.stem if path.suffix.lower() in (".ts", ".mp4", ".mkv", ".avi", ".mov", ".m4v") else name
+    stem = unicodedata.normalize("NFKD", stem)
+    stem = "".join(ch for ch in stem if not unicodedata.combining(ch))
     stem = re.sub(r"[_\s-]*\d{8}[_-]\d{6}$", "", stem)
     stem = re.sub(r"\s*\(\d{4}\)\s*$", "", stem)
     stem = re.sub(r"[_\s-]+(?:19|20)\d{2}$", "", stem)
@@ -1328,7 +1990,7 @@ def find_matching_fire_tv_captures(title: str):
     return list(dict.fromkeys(candidates))
 
 
-def convert_capture_to_plex_movie(title: str, source_path: Path):
+def convert_capture_to_plex_movie(title: str, source_path: Path, cleanup_sources=None):
     safe_name = clean_filename(title)
     folder = Path(NAS_MOVIES_PATH) / safe_name
     folder.mkdir(parents=True, exist_ok=True)
@@ -1348,8 +2010,9 @@ def convert_capture_to_plex_movie(title: str, source_path: Path):
     log.info(f"SOURCE -> {source_path}")
     log.info(f"OUTPUT -> {output_path}")
 
+    process_label = ffmpeg_process_label("convert", title)
     cmd = [
-        FFMPEG_PATH,
+        process_label,
         "-y",
         "-loglevel", "error",
         "-i", str(source_path),
@@ -1357,7 +2020,8 @@ def convert_capture_to_plex_movie(title: str, source_path: Path):
         str(partial_path),
     ]
 
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    log.info(f"FFMPEG PROCESS -> {process_label}")
+    proc = subprocess.run(cmd, executable=FFMPEG_PATH, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     err = (proc.stderr or "").strip()
     if err:
         ffmpeg_log_path.write_text(err)
@@ -1378,8 +2042,10 @@ def convert_capture_to_plex_movie(title: str, source_path: Path):
         output_path.unlink()
     partial_path.rename(output_path)
 
+    cleanup_sources = cleanup_sources if cleanup_sources is not None else find_matching_fire_tv_captures(title)
     deleted_sources = []
-    for ts_path in find_matching_fire_tv_captures(title):
+    for ts_path in cleanup_sources:
+        ts_path = Path(ts_path)
         try:
             ts_path.unlink()
             deleted_sources.append(str(ts_path))
@@ -1426,6 +2092,25 @@ def run_firetv_conversion(title: str):
     return result
 
 
+def run_plex_ts_conversion(title: str, source_path: Path):
+    if not source_path.exists():
+        raise FileNotFoundError(f"Plex TS source not found: {source_path}")
+    if source_path.suffix.lower() != ".ts":
+        raise RuntimeError(f"Plex TS source is not a .ts file: {source_path}")
+
+    log.info(f"CONVERT PLEX TS START -> {title} | {source_path}")
+    result = convert_capture_to_plex_movie(title, source_path, cleanup_sources=[source_path])
+    log.info(f"CONVERT PLEX TS DONE -> {title} | {result.get('file')}")
+    log_system_event(
+        "info",
+        "conversion",
+        "Plex TS conversion completed",
+        title=title,
+        details=result.get("file"),
+    )
+    return result
+
+
 def probe_duration(path: Path):
     ffprobe_path = str(Path(FFMPEG_PATH).with_name("ffprobe"))
     try:
@@ -1457,7 +2142,9 @@ def probe_duration(path: Path):
 
 if __name__ == "__main__":
     load_config()
+    set_server_process_title()
     load_runtime_settings()
+    ensure_db_mounted("startup", force=True)
 
     log.info("=" * 50)
     log.info("EPG Mac Recording Server starting...")
@@ -1467,17 +2154,30 @@ if __name__ == "__main__":
     log.info(f"NAS Movies Path : {NAS_MOVIES_PATH}")
     log.info(f"NAS TV Path     : {NAS_TV_PATH}")
     log.info(f"Fire TV Paths   : {', '.join(FIRE_TV_PATHS)}")
+    log.info(f"Local Record Path: {LOCAL_RECORDING_PATH}")
     log.info(f"ffmpeg          : {FFMPEG_PATH}")
     log.info(f"Port            : {SERVER_PORT}")
     log.info(f"DB Path         : {DB_PATH}")
+    log.info(f"DB Share URL    : {DB_SHARE_URL}")
+    log.info(f"DB Auto Mount   : {AUTO_MOUNT_DB_SHARE}")
     log.info(f"DB Exists       : {Path(DB_PATH).exists()}")
     log.info(f"Record Padding  : {RECORDING_PADDING_SECONDS}s")
     log.info(f"Convert Safety  : {CONVERSION_RECORDING_SAFETY_SECONDS}s")
+    log.info(f"Import Safety   : {GUIDE_IMPORT_RECORDING_SAFETY_SECONDS}s")
+    log.info(f"Auto Import     : {GUIDE_IMPORT_AUTO_ENABLED} at {GUIDE_IMPORT_DAILY_TIME}")
     log.info(f"Min Duration    : {MIN_DURATION_RATIO:.2f}")
     log.info(f"Min Bitrate     : {MIN_AVG_BITRATE_KBPS} kbps")
+    log.info(f"Import Command  : {'configured' if GUIDE_IMPORT_COMMAND else 'not configured'}")
+    log.info(f"Convert Queue   : {CONVERSION_QUEUE_JSON_PATH}")
     log.info(f"Upcoming JSON   : {UPCOMING_JSON_PATH}")
     log_recording_settings_status()
     log.info("=" * 50)
+    log_system_event(
+        "info",
+        "server",
+        "EPG Mac server started",
+        details=f"version={SERVER_VERSION}; process_title={SERVER_PROCESS_TITLE}; db={DB_PATH}",
+    )
 
     if not Path(FFMPEG_PATH).exists():
         log.error(f"ffmpeg not found at {FFMPEG_PATH}")
@@ -1487,11 +2187,19 @@ if __name__ == "__main__":
     if not Path(DB_PATH).exists():
         log_system_event("warn", "startup", "Movies DB path not found at startup", details=DB_PATH)
 
+    load_conversion_queue()
+
     scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
     scheduler_thread.start()
 
     conversion_thread = threading.Thread(target=conversion_queue_loop, daemon=True)
     conversion_thread.start()
+
+    guide_import_thread = threading.Thread(target=guide_import_loop, daemon=True)
+    guide_import_thread.start()
+
+    guide_import_daily_thread = threading.Thread(target=guide_import_daily_scheduler_loop, daemon=True)
+    guide_import_daily_thread.start()
 
     app.run(
         host="0.0.0.0",
@@ -1499,3 +2207,4 @@ if __name__ == "__main__":
         debug=False,
         threaded=True
     )
+
