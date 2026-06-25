@@ -1,4 +1,4 @@
-﻿' [2026-03-02] EPG Watch v10.55 - UNIFIED MASTER VERSION
+' [2026-03-02] EPG Watch v10.55 - UNIFIED MASTER VERSION
 ' Merged: v10.54 + User's Archiving Download + Full History Logic
 ' CONSTRAINTS: No " in SQL, ordered reports, Direct ADB Argument Injection.
 ' FIXES: PowerShell quote-mangling and "While:End While" shorthand errors.
@@ -17,7 +17,7 @@ Imports System.Linq
 
 Public Module epgmanager
     ' --- CONFIG CONSTANTS ---
-    Public Const MY_CONFIG As String = "C:\EPG\config.json"
+    Public MY_CONFIG As String = "C:\EPG\config.json"
     ' --- GLOBAL VARIABLES ---
     Public _nasIp As String = ""
     Private _nasWarehouseDir As String = ""
@@ -52,6 +52,8 @@ Public Module epgmanager
 
     Sub Main(args As String())
 
+        ApplyCommandLineArgs(args)
+
         Dim version = Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString()
 
         Console.Title = "EPG Manager v" & version
@@ -60,9 +62,23 @@ Public Module epgmanager
         Dim sw As Stopwatch = Stopwatch.StartNew()
 
         Try
+            If HasArg(args, "--import-guide-only") Then
+                If Not LoadGuideImportConfig() Then
+                    Console.WriteLine("Could not load guide import config at " & MY_CONFIG)
+                    Environment.ExitCode = 1
+                    Return
+                End If
+
+                Console.WriteLine("Import guide only mode")
+                GuideUpdater.UpdateGuide()
+                Console.WriteLine("Import guide complete")
+                Return
+            End If
+
             If Not LoadConfig() Then
                 Console.WriteLine("Could not load config.json at " & MY_CONFIG)
-                Console.ReadLine()
+                If Not HasArg(args, "--non-interactive") Then Console.ReadLine()
+                Environment.ExitCode = 1
                 Return
             End If
 
@@ -927,6 +943,64 @@ ON guide(xml_file, channel, start_utc);
         End SyncLock
     End Function
 
+
+
+
+    Private Function LoadGuideImportConfig() As Boolean
+        Try
+            If Not File.Exists(MY_CONFIG) Then
+                Console.WriteLine("Config not found: " & MY_CONFIG)
+                Return False
+            End If
+
+            Dim root = JsonDocument.Parse(File.ReadAllText(MY_CONFIG)).RootElement
+            Dim prop As JsonElement
+
+            _DbPath = RequiredConfig(root, "DB_PATH")
+            _guideDir = RequiredConfig(root, "GUIDE_DATA_DIR")
+            _epgUrl = RequiredConfig(root, "EPG_BASE_URL")
+            _epgXMLTV = RequiredConfig(root, "EPG_XMLTV")
+            _epgUser = RequiredConfig(root, "EPG_USER")
+            _epgPass = RequiredConfig(root, "EPG_PASS")
+
+            If root.TryGetProperty("USER_AGENT_TM", prop) AndAlso prop.ValueKind = JsonValueKind.String Then
+                _userAgentTM = prop.GetString()
+            ElseIf root.TryGetProperty("USER_AGENT", prop) AndAlso prop.ValueKind = JsonValueKind.String Then
+                _userAgentTM = prop.GetString()
+            End If
+
+            If root.TryGetProperty("SD_USER", prop) AndAlso prop.ValueKind = JsonValueKind.String Then _sdUser = prop.GetString()
+            If root.TryGetProperty("SD_PASS", prop) AndAlso prop.ValueKind = JsonValueKind.String Then _sdPass = prop.GetString()
+
+            Return True
+        Catch ex As Exception
+            Console.WriteLine("Guide import config error: " & ex.Message)
+            Return False
+        End Try
+    End Function
+
+    Private Function RequiredConfig(root As JsonElement, key As String) As String
+        Dim prop As JsonElement
+        If root.TryGetProperty(key, prop) AndAlso prop.ValueKind = JsonValueKind.String AndAlso Not String.IsNullOrWhiteSpace(prop.GetString()) Then
+            Return prop.GetString()
+        End If
+        Throw New Exception("Missing JSON key -> " & key)
+    End Function
+
+    Private Sub ApplyCommandLineArgs(args As String())
+        For i = 0 To args.Length - 1
+            Dim arg = args(i)
+            If arg.Equals("--config", StringComparison.OrdinalIgnoreCase) AndAlso i + 1 < args.Length Then
+                MY_CONFIG = args(i + 1)
+            ElseIf arg.StartsWith("--config=", StringComparison.OrdinalIgnoreCase) Then
+                MY_CONFIG = arg.Substring("--config=".Length)
+            End If
+        Next
+    End Sub
+
+    Private Function HasArg(args As String(), name As String) As Boolean
+        Return args.Any(Function(a) a.Equals(name, StringComparison.OrdinalIgnoreCase))
+    End Function
     Public Function GetXtreamJson(epgUrl As String,
                              user As String,
                              pass As String,
@@ -1038,4 +1112,7 @@ ON guide(xml_file, channel, start_utc);
         Public Property MyChannel As String
     End Class
 End Module
+
+
+
 

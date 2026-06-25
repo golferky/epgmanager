@@ -65,11 +65,31 @@ _HTML = """<!doctype html>
       min-width: 0;
     }
     section h2 {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
       margin: 0;
       padding: 10px 12px;
       border-bottom: 1px solid var(--line);
       font-size: 14px;
       font-weight: 650;
+      cursor: pointer;
+      user-select: none;
+    }
+    section h2::after {
+      content: "▾";
+      color: var(--muted);
+      font-size: 12px;
+    }
+    section.collapsed h2 {
+      border-bottom: 0;
+    }
+    section.collapsed h2::after {
+      content: "▸";
+    }
+    section.collapsed .body {
+      display: none;
     }
     .wide { grid-column: span 12; }
     .half { grid-column: span 6; }
@@ -117,6 +137,13 @@ _HTML = """<!doctype html>
     .ok { color: var(--ok); }
     .warn { color: var(--warn); }
     .bad { color: var(--bad); }
+    .wanted-owned td {
+      background: #b8cbe2;
+      color: #061d3b;
+    }
+    .wanted-missing td {
+      background: #ffffff;
+    }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -194,6 +221,16 @@ _HTML = """<!doctype html>
     </section>
 
     <section class="wide">
+      <h2>Guide</h2>
+      <div class="body" id="guideRowsBox"></div>
+    </section>
+
+    <section class="wide">
+      <h2>Wanted Queue</h2>
+      <div class="body" id="wantedBox"></div>
+    </section>
+
+    <section class="wide">
       <h2>Guide Import Output</h2>
       <div class="body"><pre id="guideOutput"></pre></div>
     </section>
@@ -207,7 +244,7 @@ _HTML = """<!doctype html>
         "&": "&amp;",
         "<": "&lt;",
         ">": "&gt;",
-        "\"": "&quot;",
+        "\\\"": "&quot;",
         "'": "&#39;"
       }[ch]));
     }
@@ -230,8 +267,18 @@ _HTML = """<!doctype html>
       return `<span class="pill ${statusClass(value)}">${esc(value || "unknown")}</span>`;
     }
 
-    async function getJson(url) {
-      const response = await fetch(url, { cache: "no-store" });
+    async function getJson(url, timeoutMs = 10000) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      let response;
+      try {
+        response = await fetch(url, { cache: "no-store", signal: controller.signal });
+      } catch (err) {
+        if (err.name === "AbortError") throw new Error(`${url} timed out`);
+        throw err;
+      } finally {
+        clearTimeout(timeout);
+      }
       if (!response.ok) throw new Error(`${url} returned ${response.status}`);
       return response.json();
     }
@@ -306,25 +353,78 @@ _HTML = """<!doctype html>
         `<table><thead><tr><th>Title</th><th>Channel</th><th>Start</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
     }
 
+    function renderGuideRows(guideRows) {
+      const items = guideRows.items || [];
+      const rows = items.map((item) =>
+        `<tr><td>${esc(item.my_channel || "")}</td><td>${esc(item.nickname || item.channel || "")}</td><td>${esc(item.title || "")}</td><td>${esc(item.start_time || "")}</td><td>${esc(item.until_start || "")}</td><td>${esc(item.end_time || "")}</td><td>${esc(item.progress ?? "")}</td></tr>`
+      ).join("");
+      $("guideRowsBox").innerHTML =
+        `<p>${esc(guideRows.count || items.length)} guide row(s), favorites first</p>` +
+        `<table><thead><tr><th>Ch</th><th>Channel</th><th>Title</th><th>Start</th><th>When</th><th>End</th><th>%</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+
+    function renderWanted(wanted) {
+      const items = wanted.items || [];
+      const rows = items.map((item) => {
+        const owned = !!item.plex;
+        const cls = owned ? "wanted-owned" : "wanted-missing";
+        const plexText = owned ? "In Plex" : "Wanted";
+        const year = item.year ? ` (${esc(item.year)})` : "";
+        return `<tr class="${cls}"><td>${esc(item.title)}${year}</td><td>${esc(item.type || "")}</td><td>${esc(plexText)}</td><td>${esc(item.notes || "")}</td><td>${esc(item.source_person || item.source || "")}</td><td>${esc((item.created_at || "").slice(0, 10))}</td></tr>`;
+      }).join("");
+      $("wantedBox").innerHTML =
+        `<p>${esc(wanted.count || items.length)} wanted title(s)</p>` +
+        `<table><thead><tr><th>Title</th><th>Type</th><th>Plex</th><th>Notes</th><th>Source</th><th>Added</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+
     async function refresh() {
       $("toast").textContent = "Refreshing...";
-      try {
-        const [ping, active, guide, queue, upcoming] = await Promise.all([
-          getJson("/ping"),
-          getJson("/jobs/active"),
-          getJson("/guide_import/status"),
-          getJson("/convert_queue"),
-          getJson("/upcoming")
-        ]);
-        renderServer(ping);
-        renderRecording(active);
-        renderGuide(guide);
-        renderQueue(queue);
-        renderUpcoming(upcoming);
+      const calls = [
+        ["server", getJson("/ping")],
+        ["recording", getJson("/jobs/active")],
+        ["guide", getJson("/guide_import/status")],
+        ["queue", getJson("/convert_queue")],
+        ["upcoming", getJson("/upcoming")],
+        ["guideRows", getJson("/guide?filter=favorites&limit=150")],
+        ["wanted", getJson("/wanted")]
+      ];
+
+      const results = await Promise.allSettled(calls.map(([, promise]) => promise));
+      const failed = [];
+
+      results.forEach((result, index) => {
+        const name = calls[index][0];
+        if (result.status !== "fulfilled") {
+          failed.push(`${name}: ${result.reason.message || result.reason}`);
+          return;
+        }
+        if (name === "server") renderServer(result.value);
+        if (name === "recording") renderRecording(result.value);
+        if (name === "guide") renderGuide(result.value);
+        if (name === "queue") renderQueue(result.value);
+        if (name === "upcoming") renderUpcoming(result.value);
+        if (name === "guideRows") renderGuideRows(result.value);
+        if (name === "wanted") renderWanted(result.value);
+      });
+
+      if (failed.length) {
+        $("toast").innerHTML = `<span class="bad">${esc(failed.join("; "))}</span>`;
+      } else {
         $("toast").textContent = `Updated ${new Date().toLocaleTimeString()}`;
-      } catch (err) {
-        $("toast").innerHTML = `<span class="bad">${esc(err.message)}</span>`;
       }
+    }
+
+    function setupCollapsibleSections() {
+      document.querySelectorAll("section").forEach((section, index) => {
+        const header = section.querySelector("h2");
+        if (!header) return;
+        const key = `epgmanager_web_collapsed_${header.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_") || index}`;
+        if (localStorage.getItem(key) === "1") section.classList.add("collapsed");
+        header.addEventListener("click", () => {
+          section.classList.toggle("collapsed");
+          localStorage.setItem(key, section.classList.contains("collapsed") ? "1" : "0");
+        });
+      });
     }
 
     async function requestImport() {
@@ -342,6 +442,7 @@ _HTML = """<!doctype html>
 
     $("refreshBtn").addEventListener("click", refresh);
     $("importBtn").addEventListener("click", requestImport);
+    setupCollapsibleSections();
     refresh();
     setInterval(refresh, 30000);
   </script>

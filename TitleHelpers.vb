@@ -1,4 +1,6 @@
 ﻿Imports System.Text.RegularExpressions
+Imports System.Globalization
+Imports System.Text
 Imports Microsoft.Data.Sqlite
 Public Module TitleHelpers
 
@@ -22,7 +24,7 @@ Public Module TitleHelpers
     End Function
     Public Function NormalizeTitle(title As String) As String
 
-        Dim t = title
+        Dim t = RemoveDiacritics(title)
         t = Regex.Replace(t, "[^\w\s]", "")
 
         ' remove IPTV quality tags
@@ -57,6 +59,18 @@ Public Module TitleHelpers
 
         Return t.Trim()
 
+    End Function
+    Private Function RemoveDiacritics(value As String) As String
+        If String.IsNullOrWhiteSpace(value) Then Return ""
+
+        Dim normalized = value.Normalize(NormalizationForm.FormD)
+        Dim sb As New StringBuilder()
+        For Each ch As Char In normalized
+            If CharUnicodeInfo.GetUnicodeCategory(ch) <> UnicodeCategory.NonSpacingMark Then
+                sb.Append(ch)
+            End If
+        Next
+        Return sb.ToString().Normalize(NormalizationForm.FormC)
     End Function
     Public Function GetChannelQuality(channel As String) As Integer
 
@@ -130,3 +144,4 @@ Public Module TitleHelpers
     End Function
 
 End Module
+

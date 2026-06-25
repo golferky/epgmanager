@@ -6,6 +6,7 @@
 
 import json
 import logging
+import re
 import shlex
 import shutil
 import sqlite3
@@ -26,7 +27,7 @@ except Exception:
 app = Flask(__name__)
 
 # --- CONFIG ------------------------------------------------
-SERVER_VERSION = "2026.06.15.1"
+SERVER_VERSION = "2026.06.25.1"
 SERVER_PROCESS_TITLE = "EPG Mac Server"
 NAS_MOVIES_PATH = "/Volumes/Plex/Movies"
 NAS_TV_PATH = "/Volumes/Plex/TV Shows"
@@ -60,8 +61,15 @@ CONVERSION_RECORDING_SAFETY_SECONDS = 15 * 60
 GUIDE_IMPORT_RECORDING_SAFETY_SECONDS = 30 * 60
 GUIDE_IMPORT_AUTO_ENABLED = True
 GUIDE_IMPORT_DAILY_TIME = "05:00"
+WANTED_AUTO_RECORD_ENABLED = True
+WANTED_AUTO_RECORD_INTERVAL_SECONDS = 15 * 60
+TS_BACKLOG_AUTO_CLEANUP_ENABLED = True
+TS_BACKLOG_SCAN_INTERVAL_SECONDS = 30 * 60
+TS_BACKLOG_QUEUE_TARGET = 5
+TS_BACKLOG_MAX_QUEUE_PER_SCAN = 5
 MIN_DURATION_RATIO = 0.85
 MIN_AVG_BITRATE_KBPS = 1200
+MOVIE_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".m4v"}
 # ----------------------------------------------------------
 
 # --- LOGGING ----------------------------------------------
@@ -88,6 +96,9 @@ conversion_lock = threading.Lock()
 active_conversion = None
 conversion_queue = []
 conversion_queue_history = []
+conversion_queue_paused = False
+conversion_queue_pause_reason = None
+conversion_queue_paused_at = None
 conversion_queue_lock = threading.Lock()
 pending_system_events = []
 pending_system_events_lock = threading.Lock()
@@ -104,6 +115,17 @@ guide_import_state = {
     "last_error": None,
     "last_output": None,
     "pid": None,
+}
+wanted_auto_record_state = {
+    "last_checked": None,
+    "last_scheduled": 0,
+    "last_error": None,
+}
+ts_backlog_cleanup_state = {
+    "last_checked": None,
+    "last_found": 0,
+    "last_queued": 0,
+    "last_error": None,
 }
 
 
@@ -235,6 +257,19 @@ def db_connect_quick(timeout_seconds: float = 5.0):
     return con
 
 
+def validate_db_ready(reason: str = "startup") -> bool:
+    if not ensure_db_mounted(reason, force=(reason == "startup")):
+        return False
+
+    try:
+        with db_connect_quick(timeout_seconds=5) as con:
+            con.execute("SELECT 1").fetchone()
+        return True
+    except Exception as e:
+        log.error(f"DB validation failed ({reason}) -> {e}")
+        return False
+
+
 def is_sqlite_locked_error(err: Exception) -> bool:
     return isinstance(err, sqlite3.OperationalError) and "database is locked" in str(err).lower()
 
@@ -301,6 +336,8 @@ def load_app_settings(*keys):
 def load_runtime_settings():
     global RECORDING_PADDING_SECONDS, CONVERSION_RECORDING_SAFETY_SECONDS, GUIDE_IMPORT_RECORDING_SAFETY_SECONDS
     global GUIDE_IMPORT_AUTO_ENABLED, GUIDE_IMPORT_DAILY_TIME
+    global WANTED_AUTO_RECORD_ENABLED, WANTED_AUTO_RECORD_INTERVAL_SECONDS
+    global TS_BACKLOG_AUTO_CLEANUP_ENABLED, TS_BACKLOG_SCAN_INTERVAL_SECONDS, TS_BACKLOG_QUEUE_TARGET, TS_BACKLOG_MAX_QUEUE_PER_SCAN
     global MIN_DURATION_RATIO, MIN_AVG_BITRATE_KBPS
 
     try:
@@ -310,6 +347,12 @@ def load_runtime_settings():
             "guide_import_recording_safety_seconds",
             "guide_import_auto_enabled",
             "guide_import_daily_time",
+            "wanted_auto_record_enabled",
+            "wanted_auto_record_interval_seconds",
+            "ts_backlog_auto_cleanup_enabled",
+            "ts_backlog_scan_interval_seconds",
+            "ts_backlog_queue_target",
+            "ts_backlog_max_queue_per_scan",
             "min_duration_ratio",
             "min_avg_bitrate_kbps",
         )
@@ -322,6 +365,12 @@ def load_runtime_settings():
     GUIDE_IMPORT_RECORDING_SAFETY_SECONDS = parse_int_setting(settings, "guide_import_recording_safety_seconds", GUIDE_IMPORT_RECORDING_SAFETY_SECONDS)
     GUIDE_IMPORT_AUTO_ENABLED = bool_config_value(settings.get("guide_import_auto_enabled", GUIDE_IMPORT_AUTO_ENABLED))
     GUIDE_IMPORT_DAILY_TIME = parse_daily_time_setting(settings.get("guide_import_daily_time", GUIDE_IMPORT_DAILY_TIME), GUIDE_IMPORT_DAILY_TIME)
+    WANTED_AUTO_RECORD_ENABLED = bool_config_value(settings.get("wanted_auto_record_enabled", WANTED_AUTO_RECORD_ENABLED))
+    WANTED_AUTO_RECORD_INTERVAL_SECONDS = parse_int_setting(settings, "wanted_auto_record_interval_seconds", WANTED_AUTO_RECORD_INTERVAL_SECONDS)
+    TS_BACKLOG_AUTO_CLEANUP_ENABLED = bool_config_value(settings.get("ts_backlog_auto_cleanup_enabled", TS_BACKLOG_AUTO_CLEANUP_ENABLED))
+    TS_BACKLOG_SCAN_INTERVAL_SECONDS = parse_int_setting(settings, "ts_backlog_scan_interval_seconds", TS_BACKLOG_SCAN_INTERVAL_SECONDS)
+    TS_BACKLOG_QUEUE_TARGET = max(1, parse_int_setting(settings, "ts_backlog_queue_target", TS_BACKLOG_QUEUE_TARGET))
+    TS_BACKLOG_MAX_QUEUE_PER_SCAN = max(1, parse_int_setting(settings, "ts_backlog_max_queue_per_scan", TS_BACKLOG_MAX_QUEUE_PER_SCAN))
     MIN_DURATION_RATIO = parse_float_setting(settings, "min_duration_ratio", MIN_DURATION_RATIO)
     MIN_AVG_BITRATE_KBPS = parse_int_setting(settings, "min_avg_bitrate_kbps", MIN_AVG_BITRATE_KBPS)
 
@@ -458,6 +507,302 @@ def ensure_recording_failure_tables(con):
         )
         """
     )
+
+
+def ensure_wanted_titles_table(con):
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wanted_titles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            normalized_title TEXT NOT NULL,
+            year TEXT NOT NULL DEFAULT '',
+            type TEXT NOT NULL DEFAULT 'movie',
+            imdb_id TEXT,
+            tmdb_id TEXT,
+            source TEXT,
+            source_person TEXT,
+            status TEXT NOT NULL DEFAULT 'wanted',
+            notes TEXT,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at DATETIME
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_wanted_titles_norm_year_type
+        ON wanted_titles(normalized_title, year, type)
+        """
+    )
+
+
+def extract_movie_year(value: str) -> str:
+    import re
+    if not value:
+        return ""
+    match = re.search(r"(19|20)\d{2}", str(value))
+    return match.group(0) if match else ""
+
+
+def movie_year_key(title: str, year: str = "") -> str:
+    clean_year = extract_movie_year(year) or extract_movie_year(title)
+    if not clean_year:
+        return ""
+    norm = normalize_title(title)
+    return f"{norm}\t{clean_year}" if norm else ""
+
+
+def build_plex_movie_index():
+    plex_dir = Path(NAS_MOVIES_PATH)
+    norms = set()
+    year_keys = set()
+    if not plex_dir.exists():
+        return norms, year_keys
+
+    video_exts = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".ts"}
+
+    def add_title(value: str):
+        norm = normalize_title(value)
+        if norm:
+            norms.add(norm)
+        key = movie_year_key(value, value)
+        if key:
+            year_keys.add(key)
+
+    try:
+        for path in plex_dir.rglob("*"):
+            if path.is_dir():
+                add_title(path.name)
+                continue
+
+            if path.suffix.lower() in video_exts:
+                add_title(path.stem)
+                add_title(path.parent.name)
+    except Exception as e:
+        log.warning(f"Plex movie scan skipped/incomplete -> {e}")
+
+    return norms, year_keys
+
+
+def clean_movie_title_without_year(value: str) -> str:
+    name = str(value or "").replace("_", " ")
+    name = re.sub(r"\s*\((?:19|20)\d{2}\)\s*$", "", name)
+    name = re.sub(r"[\s_-]+(?:19|20)\d{2}$", "", name)
+    name = re.sub(r"\s+", " ", name).strip(" .-_")
+    return name
+
+
+def extract_release_year_from_name(value: str) -> str:
+    name = Path(str(value or "")).stem
+    paren_years = re.findall(r"\(((?:19|20)\d{2})\)", name)
+    if paren_years:
+        return paren_years[-1]
+    trailing = re.search(r"(?:^|[\s_-])((?:19|20)\d{2})\s*$", name)
+    return trailing.group(1) if trailing else ""
+
+
+def plex_missing_year_key(value: str) -> str:
+    return normalize_title(clean_movie_title_without_year(value))
+
+
+def plex_folder_has_year(folder_name: str) -> bool:
+    return re.search(r"\((?:19|20)\d{2}\)\s*$", str(folder_name or "")) is not None
+
+
+def plex_movie_files(folder: Path):
+    files = []
+    try:
+        for path in folder.iterdir():
+            if path.is_file() and path.suffix.lower() in MOVIE_VIDEO_EXTENSIONS:
+                files.append(path)
+    except Exception:
+        return []
+    return files
+
+
+def is_partial_movie_file(path: Path) -> bool:
+    name = path.name.lower()
+    return ".part." in name or name.endswith(".part.mp4") or name.endswith(".tmpmp4")
+
+
+def add_plex_year_index_value(index: dict, title: str, year_value):
+    year = extract_movie_year(str(year_value or ""))
+    key = plex_missing_year_key(title)
+    if key and year:
+        index.setdefault(key, set()).add(year)
+
+
+def load_plex_year_index():
+    index = {}
+    try:
+        with db_connect_quick(timeout_seconds=3) as con:
+            tables = {
+                row["name"]
+                for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+
+            if "master_titles" in tables:
+                columns = {
+                    row["name"]
+                    for row in con.execute("PRAGMA table_info(master_titles)").fetchall()
+                }
+                if "title" in columns and "year" in columns:
+                    for row in con.execute(
+                        """
+                        SELECT title, year
+                        FROM master_titles
+                        WHERE title IS NOT NULL
+                          AND year IS NOT NULL
+                          AND CAST(year AS TEXT) <> ''
+                        """
+                    ):
+                        add_plex_year_index_value(index, row["title"], row["year"])
+
+    except Exception as e:
+        log.warning(f"Plex year index unavailable -> {e}")
+    return index
+
+
+def add_plex_year_skip(result: dict, item: dict):
+    result["skipped_count"] += 1
+    if len(result["skipped"]) < 50:
+        result["skipped"].append(item)
+
+
+def scan_plex_missing_years(
+    limit: int = 200,
+    apply_changes: bool = False,
+    max_folders: int = 500,
+    use_db_index: bool = False,
+):
+    movies_dir = Path(NAS_MOVIES_PATH)
+    result = {
+        "movies_path": str(movies_dir),
+        "limit": limit,
+        "max_folders": max_folders,
+        "use_db_index": use_db_index,
+        "dry_run": not apply_changes,
+        "candidates": [],
+        "renamed": [],
+        "skipped": [],
+        "skipped_count": 0,
+        "folders_scanned": 0,
+    }
+
+    if not movies_dir.exists():
+        raise FileNotFoundError(f"Plex movies path not found: {movies_dir}")
+
+    year_index = load_plex_year_index() if use_db_index else {}
+
+    for folder in movies_dir.iterdir():
+        if not folder.is_dir():
+            continue
+        if max_folders > 0 and result["folders_scanned"] >= max_folders:
+            break
+        result["folders_scanned"] += 1
+        if limit > 0 and len(result["candidates"]) + len(result["renamed"]) >= limit:
+            break
+        if plex_folder_has_year(folder.name):
+            continue
+
+        base_title = clean_movie_title_without_year(folder.name)
+        if not base_title:
+            continue
+
+        files = plex_movie_files(folder)
+        completed_files = [path for path in files if not is_partial_movie_file(path)]
+        if not completed_files:
+            add_plex_year_skip(result, {
+                "folder": folder.name,
+                "reason": "no completed movie file found",
+            })
+            continue
+
+        years = set()
+        for path in completed_files:
+            year = extract_release_year_from_name(path.name)
+            if year:
+                years.add(year)
+        source = "file"
+
+        if not years:
+            years = set(year_index.get(plex_missing_year_key(base_title), set()))
+            source = "database"
+
+        if len(years) != 1:
+            add_plex_year_skip(result, {
+                "folder": folder.name,
+                "title": base_title,
+                "reason": "no unique year found" if not years else f"multiple possible years: {', '.join(sorted(years))}",
+            })
+            continue
+
+        year = next(iter(years))
+        target_folder_name = clean_filename(f"{base_title} ({year})")
+        target_folder = movies_dir / target_folder_name
+        file_rename = None
+
+        if target_folder.exists() and target_folder.resolve() != folder.resolve():
+            add_plex_year_skip(result, {
+                "folder": folder.name,
+                "title": base_title,
+                "year": year,
+                "reason": f"target folder already exists: {target_folder.name}",
+            })
+            continue
+
+        if len(completed_files) == 1:
+            source_file = completed_files[0]
+            target_file = folder / f"{target_folder_name}{source_file.suffix}"
+            if source_file.name != target_file.name:
+                if target_file.exists():
+                    add_plex_year_skip(result, {
+                        "folder": folder.name,
+                        "title": base_title,
+                        "year": year,
+                        "reason": f"target file already exists: {target_file.name}",
+                    })
+                    continue
+                file_rename = {
+                    "from": source_file.name,
+                    "to": target_file.name,
+                }
+        elif apply_changes:
+            add_plex_year_skip(result, {
+                "folder": folder.name,
+                "title": base_title,
+                "year": year,
+                "reason": "multiple movie files; skipped for safety",
+            })
+            continue
+
+        item = {
+            "folder": folder.name,
+            "target_folder": target_folder_name,
+            "title": base_title,
+            "year": year,
+            "source": source,
+            "files": [path.name for path in completed_files],
+            "file_rename": file_rename,
+        }
+
+        if not apply_changes:
+            result["candidates"].append(item)
+            continue
+
+        try:
+            if file_rename:
+                (folder / file_rename["from"]).rename(folder / file_rename["to"])
+            folder.rename(target_folder)
+            result["renamed"].append(item)
+            log.info(f"PLEX YEAR FIX -> {folder.name} -> {target_folder_name}")
+        except Exception as e:
+            item["reason"] = str(e)
+            add_plex_year_skip(result, item)
+
+    return result
 
 
 def is_provider_failure(error: str) -> bool:
@@ -657,6 +1002,119 @@ def fetch_upcoming_rows(limit=50):
     return [dict(r) for r in rows]
 
 
+def fetch_recording_rows(limit=300):
+    with db_connect_quick(timeout_seconds=10) as con:
+        ensure_recording_failure_tables(con)
+        rows = con.execute(
+            """
+            SELECT
+                sr.id,
+                sr.channel,
+                COALESCE(c.nickname, sr.channel) AS nickname,
+                sr.title,
+                CASE
+                    WHEN sr.season_number IS NOT NULL AND sr.episode_number IS NOT NULL
+                    THEN 'S' || printf('%02d', sr.season_number) || 'E' || printf('%02d', sr.episode_number)
+                    ELSE ''
+                END AS episode,
+                sr.episode_title,
+                sr.start_time,
+                sr.end_time,
+                CASE
+                    WHEN sr.status IN ('queued','recording','starting') THEN 'Recording now'
+                    WHEN sr.status = 'scheduled'
+                         AND sr.start_time > datetime('now','localtime') THEN
+                        TRIM(
+                            CASE
+                                WHEN CAST((julianday(sr.start_time)-julianday('now','localtime'))*24 AS INTEGER) > 0
+                                THEN CAST((julianday(sr.start_time)-julianday('now','localtime'))*24 AS INTEGER) || 'h '
+                                ELSE ''
+                            END ||
+                            CAST(((julianday(sr.start_time)-julianday('now','localtime'))*1440) % 60 AS INTEGER) || 'm'
+                        )
+                    ELSE ''
+                END AS starts_in,
+                sr.job_id,
+                sr.process_id,
+                sr.status,
+                CASE
+                    WHEN sr.status = 'recording' THEN 'Recording'
+                    WHEN sr.status = 'queued' THEN 'Queued'
+                    WHEN sr.status = 'starting' THEN 'Starting'
+                    WHEN sr.status = 'scheduled' THEN 'Scheduled'
+                    WHEN sr.status = 'completed' THEN 'Completed'
+                    WHEN sr.status = 'cancelled' THEN 'Cancelled'
+                    WHEN sr.status = 'failed' THEN 'Failed'
+                    ELSE sr.status
+                END AS status_display,
+                sr.failure_reason
+            FROM scheduled_recordings sr
+            LEFT JOIN channels c
+              ON c.channel_id = sr.channel
+            ORDER BY
+                CASE
+                    WHEN sr.status IN ('queued','recording','starting') THEN 0
+                    WHEN sr.status = 'scheduled' THEN 1
+                    WHEN sr.status = 'failed' THEN 2
+                    WHEN sr.status = 'completed' THEN 3
+                    WHEN sr.status = 'cancelled' THEN 4
+                    ELSE 5
+                END,
+                CASE
+                    WHEN sr.status IN ('queued','recording','starting','scheduled')
+                    THEN sr.start_time
+                    ELSE NULL
+                END ASC,
+                sr.start_time DESC
+            LIMIT @limit
+            """,
+            {"limit": limit},
+        ).fetchall()
+
+    return [dict(r) for r in rows]
+
+
+def cancel_scheduled_recording(recording_id: int):
+    with db_connect() as con:
+        ensure_recording_failure_tables(con)
+        row = con.execute(
+            """
+            SELECT id, title, channel, start_time, status, job_id
+            FROM scheduled_recordings
+            WHERE id = ?
+            """,
+            (recording_id,),
+        ).fetchone()
+        if not row:
+            return None, "not_found"
+        if row["status"] not in ("scheduled", "queued"):
+            return dict(row), "not_cancelable"
+
+        con.execute(
+            """
+            UPDATE scheduled_recordings
+            SET status = 'cancelled',
+                failure_reason = NULL
+            WHERE id = ?
+              AND status IN ('scheduled','queued')
+            """,
+            (recording_id,),
+        )
+        con.commit()
+
+    log_system_event(
+        "warn",
+        "recording",
+        "Recording cancelled",
+        recording_id=recording_id,
+        job_id=row["job_id"],
+        channel=row["channel"],
+        title=row["title"],
+        details=f"start={row['start_time']}; source=api",
+    )
+    return dict(row), "cancelled"
+
+
 def claim_due_recordings():
     now = datetime.now()
     due = []
@@ -716,6 +1174,223 @@ def claim_due_recordings():
     return due
 
 
+def maybe_auto_schedule_wanted_movies():
+    if not WANTED_AUTO_RECORD_ENABLED:
+        return 0
+
+    now = time.time()
+    last_run = getattr(maybe_auto_schedule_wanted_movies, "_last_run", 0)
+    if now - last_run < WANTED_AUTO_RECORD_INTERVAL_SECONDS:
+        return 0
+
+    maybe_auto_schedule_wanted_movies._last_run = now
+    wanted_auto_record_state["last_checked"] = datetime.now().isoformat()
+
+    scheduled_count = auto_schedule_wanted_movies()
+    wanted_auto_record_state["last_scheduled"] = scheduled_count
+    wanted_auto_record_state["last_error"] = None
+    if scheduled_count:
+        log.info(f"WANTED AUTO RECORD -> scheduled {scheduled_count} movie(s)")
+    return scheduled_count
+
+
+def auto_schedule_wanted_movies():
+    plex_norms, plex_year_keys = build_plex_movie_index()
+    scheduled_count = 0
+    scheduled_events = []
+
+    with db_connect_quick(timeout_seconds=10) as con:
+        ensure_wanted_titles_table(con)
+        rows = con.execute(
+            """
+            SELECT id, title, normalized_title, year, status
+            FROM wanted_titles
+            WHERE lower(type) = 'movie'
+              AND status IN ('wanted','found')
+            ORDER BY lower(title), year
+            """
+        ).fetchall()
+
+        for wanted in rows:
+            title = wanted["title"] or ""
+            norm = wanted["normalized_title"] or normalize_title(title)
+            year = wanted["year"] or ""
+            if not norm:
+                update_wanted_auto_note(con, wanted["id"], "wanted", "Skipped: title could not be normalized")
+                continue
+
+            plex_key = movie_year_key(title, year)
+            if (plex_key and plex_key in plex_year_keys) or (not plex_key and norm in plex_norms):
+                update_wanted_auto_note(con, wanted["id"], "found", "Already in Plex; auto-record skipped")
+                continue
+
+            existing = existing_recording_for_wanted(con, norm)
+            if existing:
+                status = existing["status"] or ""
+                start_time = existing["start_time"] or ""
+                update_wanted_auto_note(con, wanted["id"], "found", f"Already {status}: {start_time}".strip())
+                continue
+
+            airing = find_best_wanted_movie_airing(con, norm, year)
+            if not airing:
+                update_wanted_auto_note(con, wanted["id"], "wanted", "No upcoming airing found in guide")
+                continue
+
+            row_id = insert_wanted_scheduled_recording(con, wanted, airing, norm)
+            scheduled_count += 1
+            update_wanted_auto_note(
+                con,
+                wanted["id"],
+                "found",
+                f"Scheduled row {row_id}: {airing['nickname'] or airing['channel']} at {airing['start_time']}",
+                last_seen=True,
+            )
+            scheduled_events.append({
+                "row_id": row_id,
+                "wanted_id": wanted["id"],
+                "channel": airing["channel"],
+                "title": airing["title"],
+                "start_time": airing["start_time"],
+            })
+
+        con.commit()
+
+    for event in scheduled_events:
+        log_system_event(
+            "info",
+            "wanted",
+            "Wanted movie auto-scheduled",
+            recording_id=event["row_id"],
+            channel=event["channel"],
+            title=event["title"],
+            details=f"wanted_id={event['wanted_id']}; start={event['start_time']}; source=mac_server",
+        )
+
+    return scheduled_count
+
+
+def existing_recording_for_wanted(con, normalized_title: str):
+    return con.execute(
+        """
+        SELECT status, start_time
+        FROM scheduled_recordings
+        WHERE lower(normalized_title) = lower(@norm)
+          AND COALESCE(program_type, '') = 'MV'
+          AND status IN ('scheduled','queued','recording','completed')
+        ORDER BY
+          CASE status
+            WHEN 'recording' THEN 0
+            WHEN 'queued' THEN 1
+            WHEN 'scheduled' THEN 2
+            WHEN 'completed' THEN 3
+            ELSE 4
+          END,
+          start_time DESC
+        LIMIT 1
+        """,
+        {"norm": normalized_title},
+    ).fetchone()
+
+
+def find_best_wanted_movie_airing(con, normalized_title: str, year: str = ""):
+    sql = """
+        SELECT *
+        FROM (
+            SELECT
+                c.channel_id AS channel,
+                c.my_channel,
+                c.nickname,
+                COALESCE(c.favorite, 0) AS favorite,
+                COALESCE(c.is_movie_channel, 0) AS is_movie_channel,
+                g.title,
+                g.normalized_title,
+                COALESCE(g.year, '') AS year,
+                g.start_time,
+                g.end_time
+            FROM channels c
+            JOIN guide_clean g ON g.channel = COALESCE(c.guide_channel, c.channel_id)
+            WHERE COALESCE(c.is_bad, 0) = 0
+
+            UNION ALL
+
+            SELECT
+                c.channel_id AS channel,
+                c.my_channel,
+                c.nickname,
+                COALESCE(c.favorite, 0) AS favorite,
+                COALESCE(c.is_movie_channel, 0) AS is_movie_channel,
+                g.title,
+                g.normalized_title,
+                COALESCE(g.year, '') AS year,
+                g.start_time,
+                g.end_time
+            FROM channels c
+            JOIN guide_clean g ON c.sd_station_id IS NOT NULL AND g.channel = c.sd_station_id
+            WHERE COALESCE(c.is_bad, 0) = 0
+        ) candidates
+        WHERE lower(COALESCE(normalized_title, '')) = lower(@norm)
+          AND start_time >= datetime('now', 'localtime')
+          AND end_time > start_time
+          AND (@year = '' OR year = @year)
+        GROUP BY channel, title, start_time, end_time
+        ORDER BY
+          favorite DESC,
+          is_movie_channel DESC,
+          CASE
+            WHEN lower(COALESCE(nickname, '')) LIKE '%(sd)%'
+              OR lower(COALESCE(nickname, '')) LIKE '% sd%'
+              OR lower(COALESCE(nickname, '')) LIKE '%sd %'
+            THEN 1 ELSE 0
+          END,
+          start_time,
+          my_channel
+        LIMIT 1
+    """
+    return con.execute(sql, {"norm": normalized_title, "year": year or ""}).fetchone()
+
+
+def insert_wanted_scheduled_recording(con, wanted, airing, normalized_title: str):
+    title = airing["title"] or wanted["title"]
+    con.execute(
+        """
+        INSERT INTO scheduled_recordings
+            (title, normalized_title, channel, start_time, end_time, status, created_at,
+             priority_override, actual_runtime, process_id, job_id, program_type,
+             season_number, episode_number, episode_title)
+        VALUES
+            (@title, @normalized_title, @channel, @start_time, @end_time, 'scheduled',
+             datetime('now','localtime'), NULL, NULL, 0, NULL, 'MV', NULL, NULL, NULL)
+        """,
+        {
+            "title": title,
+            "normalized_title": normalized_title,
+            "channel": airing["channel"],
+            "start_time": airing["start_time"],
+            "end_time": airing["end_time"],
+        },
+    )
+    return con.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def update_wanted_auto_note(con, wanted_id: int, status: str, note: str, last_seen: bool = False):
+    con.execute(
+        """
+        UPDATE wanted_titles
+        SET status = @status,
+            notes = @note,
+            updated_at = datetime('now','localtime'),
+            last_seen_at = CASE WHEN @last_seen = 1 THEN datetime('now','localtime') ELSE last_seen_at END
+        WHERE id = @id
+        """,
+        {
+            "status": status,
+            "note": note,
+            "last_seen": 1 if last_seen else 0,
+            "id": wanted_id,
+        },
+    )
+
+
 # =========================================================
 # ROUTES
 # =========================================================
@@ -729,6 +1404,7 @@ def ping():
         "db_path": DB_PATH,
         "db_exists": Path(DB_PATH).exists(),
         "pending_system_events": pending_system_event_count(),
+        "wanted_auto_record": dict(wanted_auto_record_state),
         "active_jobs": len([j for j in jobs.values() if j["status"] == "recording"])
     })
 
@@ -813,6 +1489,52 @@ def active_jobs():
             if j["status"] in ("queued", "recording")
         }
     return jsonify(active)
+
+
+@app.route("/plex/missing_years")
+def plex_missing_years():
+    """GET /plex/missing_years - preview Plex movie folders missing a year."""
+    try:
+        limit = int(request.args.get("limit", "200") or 200)
+        max_folders = int(request.args.get("max_folders", "500") or 500)
+        use_db = bool_config_value(request.args.get("use_db", "false"))
+        return jsonify(scan_plex_missing_years(
+            limit=limit,
+            apply_changes=False,
+            max_folders=max_folders,
+            use_db_index=use_db,
+        ))
+    except Exception as e:
+        status_code = 423 if is_sqlite_locked_error(e) else 500
+        log.error(f"GET /plex/missing_years error -> {e}")
+        return jsonify({"error": str(e)}), status_code
+
+
+@app.route("/plex/missing_years/fix", methods=["POST"])
+def plex_missing_years_fix():
+    """POST /plex/missing_years/fix - safely apply unambiguous Plex year renames."""
+    try:
+        data = request.get_json(silent=True) or {}
+        limit = int(data.get("limit") or request.args.get("limit", "50") or 50)
+        max_folders = int(data.get("max_folders") or request.args.get("max_folders", "500") or 500)
+        use_db = bool_config_value(data.get("use_db") if "use_db" in data else request.args.get("use_db", "false"))
+        result = scan_plex_missing_years(
+            limit=limit,
+            apply_changes=True,
+            max_folders=max_folders,
+            use_db_index=use_db,
+        )
+        log_system_event(
+            "info",
+            "plex",
+            "Plex missing-year fixer ran",
+            details=f"renamed={len(result['renamed'])}; skipped={len(result['skipped'])}; limit={limit}",
+        )
+        return jsonify(result)
+    except Exception as e:
+        status_code = 423 if is_sqlite_locked_error(e) else 500
+        log.error(f"POST /plex/missing_years/fix error -> {e}")
+        return jsonify({"error": str(e)}), status_code
 
 
 @app.route("/convert_firetv", methods=["POST"])
@@ -959,6 +1681,40 @@ def convert_plex_ts():
 @app.route("/convert_queue")
 def convert_queue_status():
     return jsonify(conversion_queue_snapshot())
+
+
+@app.route("/convert_queue/pause", methods=["POST"])
+def pause_convert_queue():
+    data = request.get_json(silent=True) or {}
+    reason = data.get("reason") or "paused by user"
+    set_conversion_queue_paused(True, reason)
+    return jsonify({
+        "status": "paused",
+        "queue": conversion_queue_snapshot(),
+    })
+
+
+@app.route("/convert_queue/resume", methods=["POST"])
+def resume_convert_queue():
+    set_conversion_queue_paused(False)
+    return jsonify({
+        "status": "running",
+        "queue": conversion_queue_snapshot(),
+    })
+
+
+@app.route("/convert_backlog/scan", methods=["POST"])
+def convert_backlog_scan():
+    try:
+        queued = maybe_auto_queue_ts_backlog(force=True)
+        return jsonify({
+            "status": "ok",
+            "queued": queued,
+            "queue": conversion_queue_snapshot(),
+        })
+    except Exception as e:
+        log.error(f"POST /convert_backlog/scan error -> {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/convert_queue/clear", methods=["POST"])
@@ -1114,6 +1870,290 @@ def upcoming():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/recordings")
+def recordings():
+    """GET /recordings - scheduled/active/recent recording history for clients."""
+    try:
+        try:
+            limit = int(request.args.get("limit") or 300)
+        except ValueError:
+            limit = 300
+        limit = max(25, min(limit, 1000))
+        rows = fetch_recording_rows(limit)
+        return jsonify({"count": len(rows), "items": rows})
+    except sqlite3.OperationalError as e:
+        if is_sqlite_locked_error(e):
+            return jsonify({"error": "database is locked"}), 503
+        log.error(f"GET /recordings error -> {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        log.error(f"GET /recordings error -> {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/recordings/<int:recording_id>/cancel", methods=["POST"])
+def cancel_recording_api(recording_id):
+    """POST /recordings/<id>/cancel - cancel a scheduled/queued recording."""
+    try:
+        row, status = cancel_scheduled_recording(recording_id)
+        if status == "not_found":
+            return jsonify({"error": "recording not found", "id": recording_id}), 404
+        if status == "not_cancelable":
+            return jsonify({
+                "error": "recording cannot be cancelled from this state",
+                "id": recording_id,
+                "recording": row,
+            }), 409
+        return jsonify({"status": "cancelled", "id": recording_id, "recording": row})
+    except sqlite3.OperationalError as e:
+        if is_sqlite_locked_error(e):
+            return jsonify({"error": "database is locked"}), 503
+        log.error(f"POST /recordings/{recording_id}/cancel error -> {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        log.error(f"POST /recordings/{recording_id}/cancel error -> {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/guide")
+def guide():
+    """GET /guide - compact current/future guide rows for the web UI."""
+    try:
+        filter_name = (request.args.get("filter") or "favorites").strip().lower()
+        try:
+            limit = int(request.args.get("limit") or 150)
+        except ValueError:
+            limit = 150
+        limit = max(25, min(limit, 500))
+
+        filters = {
+            "all": "",
+            "favorites": "c.favorite = 1",
+            "movies": "g.program_type = 'MV'",
+            "fav_movies": (
+                "c.favorite = 1 AND (g.program_type = 'MV' "
+                "OR (c.is_movie_channel = 1 "
+                "AND g.title IS NOT NULL "
+                "AND g.season_number IS NULL "
+                "AND g.episode_number IS NULL))"
+            ),
+        }
+        row_filter = filters.get(filter_name, filters["favorites"])
+        time_limit = "+4 hours" if filter_name == "all" else "+24 hours"
+        where_filter = f"{row_filter} AND " if row_filter else ""
+
+        select_sql = """
+            SELECT
+                c.channel_id AS channel,
+                c.my_channel,
+                c.nickname,
+                CASE
+                    WHEN g.season_number IS NOT NULL AND g.episode_number IS NOT NULL
+                    THEN g.title || ' [S' || printf('%02d', g.season_number) || 'E' ||
+                         printf('%02d', g.episode_number) || ']' ||
+                         CASE WHEN g.episode_title IS NOT NULL THEN ' - ' || g.episode_title ELSE '' END
+                    WHEN g.year IS NOT NULL THEN g.title || ' (' || g.year || ')'
+                    ELSE g.title
+                END AS title,
+                g.start_time,
+                g.end_time,
+                CASE
+                    WHEN datetime('now','localtime') >= g.start_time THEN 'Playing now'
+                    ELSE TRIM(
+                        CASE
+                            WHEN CAST((julianday(g.start_time)-julianday('now','localtime'))*24 AS INTEGER) > 0
+                            THEN CAST((julianday(g.start_time)-julianday('now','localtime'))*24 AS INTEGER) || ' hrs '
+                            ELSE ''
+                        END ||
+                        CASE
+                            WHEN CAST(((julianday(g.start_time)-julianday('now','localtime'))*1440) % 60 AS INTEGER) > 0
+                            THEN CAST(((julianday(g.start_time)-julianday('now','localtime'))*1440) % 60 AS INTEGER) || ' mins'
+                            ELSE ''
+                        END
+                    )
+                END AS until_start,
+                CASE
+                    WHEN datetime('now','localtime') < g.start_time THEN 0
+                    WHEN datetime('now','localtime') >= g.end_time THEN 100
+                    ELSE CAST(100.0 * (julianday('now','localtime') - julianday(g.start_time)) /
+                         (julianday(g.end_time) - julianday(g.start_time)) AS INTEGER)
+                END AS progress,
+                g.program_type,
+                c.stream_id
+            FROM channels c
+            JOIN guide_clean g ON {join_condition}
+            WHERE {where_filter}
+                  g.end_time >= datetime('now','localtime')
+              AND g.start_time <= datetime('now','localtime','{time_limit}')
+        """
+
+        sql = f"""
+            SELECT *
+            FROM (
+                {select_sql.format(join_condition="g.channel = COALESCE(c.guide_channel, c.channel_id)", where_filter=where_filter, time_limit=time_limit)}
+                UNION ALL
+                {select_sql.format(join_condition="c.sd_station_id IS NOT NULL AND g.channel = c.sd_station_id", where_filter=where_filter, time_limit=time_limit)}
+            )
+            GROUP BY channel, my_channel, nickname, title, start_time, end_time
+            ORDER BY
+                CASE WHEN datetime('now','localtime') BETWEEN start_time AND end_time THEN 0 ELSE 1 END,
+                my_channel,
+                start_time
+            LIMIT ?
+        """
+
+        with db_connect_quick(timeout_seconds=10) as con:
+            rows = con.execute(sql, (limit,)).fetchall()
+
+        return jsonify({
+            "count": len(rows),
+            "filter": filter_name,
+            "items": [dict(row) for row in rows],
+        })
+    except sqlite3.OperationalError as e:
+        if is_sqlite_locked_error(e):
+            return jsonify({"error": "database is locked"}), 503
+        log.error(f"GET /guide error -> {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        log.error(f"GET /guide error -> {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/wanted")
+def wanted():
+    """GET /wanted - wanted movie queue with Plex ownership flag."""
+    try:
+        plex_norms, plex_year_keys = build_plex_movie_index()
+        with db_connect_quick() as con:
+            ensure_wanted_titles_table(con)
+            rows = con.execute(
+                """
+                SELECT title, normalized_title, year, type, source, source_person, status, notes, created_at
+                FROM wanted_titles
+                WHERE status IN ('wanted','found')
+                ORDER BY lower(title), year
+                """
+            ).fetchall()
+
+        wanted_rows = []
+        for row in rows:
+            title = row["title"] or ""
+            norm = row["normalized_title"] or normalize_title(title)
+            year = row["year"] or ""
+            key = movie_year_key(title, year)
+            in_plex = key in plex_year_keys if key else norm in plex_norms
+            wanted_rows.append({
+                "title": title,
+                "normalized_title": norm,
+                "year": year,
+                "type": row["type"] or "",
+                "source": row["source"] or "",
+                "source_person": row["source_person"] or "",
+                "status": row["status"] or "",
+                "notes": row["notes"] or "",
+                "created_at": row["created_at"] or "",
+                "plex": in_plex,
+            })
+
+        return jsonify({
+            "count": len(wanted_rows),
+            "items": wanted_rows,
+        })
+    except sqlite3.OperationalError as e:
+        if is_sqlite_locked_error(e):
+            return jsonify({"error": "database is locked"}), 503
+        log.error(f"GET /wanted error -> {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        log.error(f"GET /wanted error -> {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/wanted", methods=["POST"])
+def add_wanted():
+    """POST /wanted - add/update a wanted title through the Mac server."""
+    try:
+        data = request.get_json(silent=True) or {}
+        title = (data.get("title") or "").strip()
+        if not title:
+            return jsonify({"error": "Missing field: title"}), 400
+
+        year = str(data.get("year") or extract_movie_year(title) or "").strip()
+        media_type = (data.get("type") or data.get("media_type") or "movie").strip().lower()
+        imdb_id = (data.get("imdb_id") or "").strip() or None
+        tmdb_id = str(data.get("tmdb_id") or "").strip() or None
+        source = (data.get("source") or "api").strip()
+        source_person = (data.get("source_person") or "").strip() or None
+        notes = (data.get("notes") or "").strip() or None
+        norm = normalize_title(title)
+        if not norm:
+            return jsonify({"error": "Title could not be normalized"}), 400
+
+        with db_connect() as con:
+            ensure_wanted_titles_table(con)
+            con.execute(
+                """
+                INSERT INTO wanted_titles
+                    (title, normalized_title, year, type, imdb_id, tmdb_id, source, source_person, status, notes)
+                VALUES
+                    (@title, @norm, @year, @type, @imdb, @tmdb, @source, @source_person, 'wanted', @notes)
+                ON CONFLICT(normalized_title, year, type) DO UPDATE SET
+                    title = excluded.title,
+                    imdb_id = COALESCE(excluded.imdb_id, wanted_titles.imdb_id),
+                    tmdb_id = COALESCE(excluded.tmdb_id, wanted_titles.tmdb_id),
+                    source = COALESCE(excluded.source, wanted_titles.source),
+                    source_person = COALESCE(excluded.source_person, wanted_titles.source_person),
+                    status = CASE
+                        WHEN wanted_titles.status IN ('recorded','found','ignored') THEN wanted_titles.status
+                        ELSE 'wanted'
+                    END,
+                    notes = COALESCE(excluded.notes, wanted_titles.notes),
+                    updated_at = datetime('now','localtime')
+                """,
+                {
+                    "title": title,
+                    "norm": norm,
+                    "year": year,
+                    "type": media_type,
+                    "imdb": imdb_id,
+                    "tmdb": tmdb_id,
+                    "source": source,
+                    "source_person": source_person,
+                    "notes": notes,
+                },
+            )
+            con.commit()
+            row = con.execute(
+                """
+                SELECT id, title, normalized_title, year, type, imdb_id, tmdb_id,
+                       source, source_person, status, notes, created_at, updated_at
+                FROM wanted_titles
+                WHERE normalized_title = @norm
+                  AND year = @year
+                  AND type = @type
+                """,
+                {"norm": norm, "year": year, "type": media_type},
+            ).fetchone()
+
+        log_system_event(
+            "info",
+            "wanted",
+            "Wanted title added",
+            title=title,
+            details=f"year={year}; type={media_type}; source={source}",
+        )
+        return jsonify({"status": "ok", "item": dict(row) if row else None})
+    except sqlite3.OperationalError as e:
+        if is_sqlite_locked_error(e):
+            return jsonify({"error": "database is locked"}), 503
+        log.error(f"POST /wanted error -> {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        log.error(f"POST /wanted error -> {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/upcoming/html")
 def upcoming_html():
     """GET /upcoming/html - human readable DB schedule."""
@@ -1207,6 +2247,7 @@ def scheduler_loop():
                     scheduler_loop._db_missing_logged = True
             else:
                 scheduler_loop._db_missing_logged = False
+                maybe_auto_schedule_wanted_movies()
                 due = claim_due_recordings()
                 for item in due:
                     start_due_recording(item)
@@ -1268,6 +2309,8 @@ def log_runtime_status():
 
     parts.append(f"conversion queue: {queued_count}")
     parts.append(f"guide import: {import_status}")
+    if WANTED_AUTO_RECORD_ENABLED:
+        parts.append(f"wanted auto: {wanted_auto_record_state.get('last_scheduled', 0)} last")
     status_text = " | ".join(parts)
     log.info("STATUS -> " + status_text)
     return status_text
@@ -1278,15 +2321,22 @@ def conversion_queue_snapshot():
         queued = [dict(item) for item in conversion_queue]
         waiting_count = sum(1 for item in queued if item.get("status") in ("queued", "deferred"))
         history = [dict(item) for item in conversion_queue_history[-25:]]
+        paused = conversion_queue_paused
+        pause_reason = conversion_queue_pause_reason
+        paused_at = conversion_queue_paused_at
 
     with jobs_lock:
         active = active_conversion
 
     return {
         "active": active,
+        "paused": paused,
+        "pause_reason": pause_reason,
+        "paused_at": paused_at,
         "queued_count": waiting_count,
         "queued": queued,
         "recent": history,
+        "ts_backlog_cleanup": dict(ts_backlog_cleanup_state),
         "pending_system_events": pending_system_event_count(),
     }
 
@@ -1297,6 +2347,9 @@ def save_conversion_queue_unlocked():
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "saved_at": datetime.now().isoformat(),
+            "paused": conversion_queue_paused,
+            "pause_reason": conversion_queue_pause_reason,
+            "paused_at": conversion_queue_paused_at,
             "queued": conversion_queue,
             "recent": conversion_queue_history[-50:],
         }
@@ -1308,6 +2361,8 @@ def save_conversion_queue_unlocked():
 
 
 def load_conversion_queue():
+    global conversion_queue_paused, conversion_queue_pause_reason, conversion_queue_paused_at
+
     path = Path(CONVERSION_QUEUE_JSON_PATH)
     if not path.exists():
         return
@@ -1335,14 +2390,43 @@ def load_conversion_queue():
             restored.append(item)
 
         with conversion_queue_lock:
+            conversion_queue_paused = bool(payload.get("paused", False))
+            conversion_queue_pause_reason = payload.get("pause_reason") if conversion_queue_paused else None
+            conversion_queue_paused_at = payload.get("paused_at") if conversion_queue_paused else None
             conversion_queue[:] = restored
             conversion_queue_history[:] = [dict(item) for item in recent[-50:] if isinstance(item, dict)]
             save_conversion_queue_unlocked()
 
         if restored:
             log.info(f"CONVERT QUEUE RESTORED -> {len(restored)} item(s)")
+        if conversion_queue_paused:
+            log.info(f"CONVERT QUEUE PAUSED RESTORED -> {conversion_queue_pause_reason or 'no reason'}")
     except Exception as e:
         log.warning(f"CONVERT QUEUE RESTORE SKIPPED -> {e}")
+
+
+def set_conversion_queue_paused(paused: bool, reason: str = None):
+    global conversion_queue_paused, conversion_queue_pause_reason, conversion_queue_paused_at
+
+    with conversion_queue_lock:
+        conversion_queue_paused = bool(paused)
+        if conversion_queue_paused:
+            conversion_queue_pause_reason = reason or "paused by user"
+            conversion_queue_paused_at = datetime.now().isoformat()
+        else:
+            conversion_queue_pause_reason = None
+            conversion_queue_paused_at = None
+        save_conversion_queue_unlocked()
+
+    state = "PAUSED" if paused else "RESUMED"
+    details = conversion_queue_pause_reason if paused else "queue resumed"
+    log.info(f"CONVERT QUEUE {state} -> {details}")
+    log_system_event(
+        "warn" if paused else "info",
+        "conversion",
+        f"Fire TV conversion queue {state.lower()}",
+        details=details,
+    )
 
 
 def enqueue_conversion(title: str, source_path: str = None, source_kind: str = "firetv"):
@@ -1381,7 +2465,132 @@ def enqueue_conversion(title: str, source_path: str = None, source_kind: str = "
 
 
 def enqueue_firetv_conversion(title: str):
-    return enqueue_conversion(title, source_kind="firetv")
+    source_path = find_fire_tv_capture(title)
+    if not source_path:
+        raise FileNotFoundError(f"No matching .ts file found in {', '.join(FIRE_TV_PATHS)}")
+    return enqueue_conversion(title, source_path=str(source_path), source_kind="firetv")
+
+
+def title_from_ts_capture(path: Path) -> str:
+    import re
+    stem = path.stem
+    stem = re.sub(r"[_\s-]*\d{8}[_-]\d{6}(?:[-_\s]*copy(?:\(\d+\))?)?$", "", stem, flags=re.IGNORECASE).strip()
+    stem = stem.replace("_", " ")
+    stem = re.sub(r"\s+", " ", stem).strip()
+    match = re.match(r"^(.*?)[\s-]+((?:19|20)\d{2})$", stem)
+    if match:
+        stem = f"{match.group(1).strip()} ({match.group(2)})"
+    return clean_filename(stem)
+
+
+def failed_conversion_keys_from_history():
+    with conversion_queue_lock:
+        failed = [
+            (item.get("source_path", ""), normalize_title(item.get("title", "")))
+            for item in conversion_queue_history
+            if item.get("status") == "failed"
+        ]
+    return set(failed)
+
+
+def scan_ts_backlog_candidates(limit: int):
+    plex_norms, plex_year_keys = build_plex_movie_index()
+    failed_keys = failed_conversion_keys_from_history()
+    candidates = []
+    seen_norms = set()
+
+    for fire_tv_path in FIRE_TV_PATHS:
+        fire_dir = Path(fire_tv_path)
+        if not fire_dir.exists():
+            continue
+
+        try:
+            ts_files = sorted(fire_dir.rglob("*.ts"), key=lambda p: p.stat().st_mtime)
+        except Exception as e:
+            log.warning(f"TS BACKLOG SCAN SKIPPED -> {fire_dir} | {e}")
+            continue
+
+        for path in ts_files:
+            try:
+                if path.name.startswith("._") or path.stat().st_size < 1_000_000:
+                    continue
+                title = title_from_ts_capture(path)
+                norm = normalize_title(title)
+                if not norm or norm in seen_norms:
+                    continue
+                key = movie_year_key(title, title)
+                if (key and key in plex_year_keys) or (not key and norm in plex_norms):
+                    continue
+                if (str(path), norm) in failed_keys or ("", norm) in failed_keys:
+                    continue
+                seen_norms.add(norm)
+                candidates.append({
+                    "title": title,
+                    "source_path": str(path),
+                    "size": path.stat().st_size,
+                    "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+                })
+                if len(candidates) >= limit:
+                    return candidates
+            except Exception as e:
+                log.warning(f"TS BACKLOG FILE SKIPPED -> {path} | {e}")
+
+    return candidates
+
+
+def maybe_auto_queue_ts_backlog(force: bool = False):
+    if not TS_BACKLOG_AUTO_CLEANUP_ENABLED and not force:
+        return 0
+
+    with conversion_queue_lock:
+        if conversion_queue_paused:
+            ts_backlog_cleanup_state["last_error"] = "conversion queue paused"
+            return 0
+
+    now = time.time()
+    last_run = getattr(maybe_auto_queue_ts_backlog, "_last_run", 0)
+    if not force and now - last_run < TS_BACKLOG_SCAN_INTERVAL_SECONDS:
+        return 0
+
+    with conversion_queue_lock:
+        waiting_count = sum(1 for item in conversion_queue if item.get("status") in ("queued", "deferred", "running"))
+
+    if waiting_count >= TS_BACKLOG_QUEUE_TARGET and not force:
+        return 0
+
+    maybe_auto_queue_ts_backlog._last_run = now
+    ts_backlog_cleanup_state["last_checked"] = datetime.now().isoformat()
+    slots = TS_BACKLOG_MAX_QUEUE_PER_SCAN if force else min(TS_BACKLOG_QUEUE_TARGET - waiting_count, TS_BACKLOG_MAX_QUEUE_PER_SCAN)
+    slots = max(0, slots)
+    if slots == 0:
+        ts_backlog_cleanup_state["last_found"] = 0
+        ts_backlog_cleanup_state["last_queued"] = 0
+        ts_backlog_cleanup_state["last_error"] = None
+        return 0
+
+    try:
+        candidates = scan_ts_backlog_candidates(slots)
+        queued = 0
+        for candidate in candidates:
+            _, added = enqueue_conversion(
+                candidate["title"],
+                source_path=candidate["source_path"],
+                source_kind="firetv",
+            )
+            if added:
+                queued += 1
+
+        ts_backlog_cleanup_state["last_found"] = len(candidates)
+        ts_backlog_cleanup_state["last_queued"] = queued
+        ts_backlog_cleanup_state["last_error"] = None
+        if queued:
+            log.info(f"TS BACKLOG AUTO QUEUED -> {queued}/{len(candidates)} item(s)")
+        return queued
+    except Exception as e:
+        ts_backlog_cleanup_state["last_error"] = str(e)
+        log.warning(f"TS BACKLOG AUTO QUEUE FAILED -> {e}")
+        log_system_event("warn", "conversion", "TS backlog auto queue failed", details=str(e))
+        return 0
 
 
 def update_conversion_queue_item(item, status: str, message: str = None):
@@ -1409,11 +2618,18 @@ def conversion_queue_loop():
 
     while not stop_scheduler.is_set():
         item = None
+        paused = False
         with conversion_queue_lock:
-            if conversion_queue:
+            paused = conversion_queue_paused
+            if not paused and conversion_queue:
                 item = conversion_queue[0]
 
+        if paused:
+            stop_scheduler.wait(10)
+            continue
+
         if not item:
+            maybe_auto_queue_ts_backlog()
             stop_scheduler.wait(10)
             continue
 
@@ -1434,8 +2650,10 @@ def conversion_queue_loop():
         try:
             if item.get("source_kind") == "plex_ts":
                 result = run_plex_ts_conversion(title, Path(item.get("source_path", "")))
+            elif item.get("source_path"):
+                result = run_firetv_conversion(title, Path(item.get("source_path", "")))
             else:
-                result = run_firetv_conversion(title)
+                raise FileNotFoundError("Queued Fire TV conversion is missing source_path; clear and requeue from a fresh scan")
             update_conversion_queue_item(item, "done", result.get("file"))
         except Exception as e:
             log.error(f"CONVERT QUEUE FAILED -> {title} | {e}")
@@ -1505,6 +2723,14 @@ def guide_import_loop():
 def guide_import_daily_scheduler_loop():
     log.info(f"Guide import daily scheduler started -> enabled={GUIDE_IMPORT_AUTO_ENABLED}, time={GUIDE_IMPORT_DAILY_TIME}")
     last_requested_date = None
+    try:
+        startup_now = datetime.now()
+        startup_target_time = datetime.strptime(GUIDE_IMPORT_DAILY_TIME, "%H:%M").time()
+        if startup_now.time() >= startup_target_time:
+            last_requested_date = startup_now.date()
+            log.info(f"GUIDE IMPORT DAILY STARTUP SKIP -> already past {GUIDE_IMPORT_DAILY_TIME} for {last_requested_date}")
+    except Exception as e:
+        log.warning(f"GUIDE IMPORT DAILY STARTUP CHECK SKIPPED -> {e}")
 
     while not stop_scheduler.is_set():
         try:
@@ -1599,7 +2825,18 @@ def run_guide_import_command():
         output = "\n".join(output_lines).strip()
         elapsed = time.time() - started
 
-        if proc.returncode == 0:
+        fatal_output = any(
+            marker in output.lower()
+            for marker in (
+                "fatal error",
+                "sqlite error",
+                "database is locked",
+                "database disk image is malformed",
+                "disk i/o error",
+            )
+        )
+
+        if proc.returncode == 0 and not fatal_output:
             log.info(f"GUIDE IMPORT DONE -> {elapsed / 60:.1f} min | {len(output_lines)} output lines")
             with guide_import_lock:
                 guide_import_state.update({
@@ -1611,7 +2848,10 @@ def run_guide_import_command():
                 })
             log_system_event("info", "guide_import", "Guide import completed", details=output[-1000:] if output else None)
         else:
-            message = f"guide import exited with code {proc.returncode}"
+            if fatal_output:
+                message = "guide import output contained a fatal database error"
+            else:
+                message = f"guide import exited with code {proc.returncode}"
             log.error(f"GUIDE IMPORT FAILED -> {message} | {elapsed / 60:.1f} min")
             with guide_import_lock:
                 guide_import_state.update({
@@ -2066,8 +3306,12 @@ def convert_capture_to_plex_movie(title: str, source_path: Path, cleanup_sources
     }
 
 
-def run_firetv_conversion(title: str):
-    source_path = find_fire_tv_capture(title)
+def run_firetv_conversion(title: str, source_path: Path = None):
+    source_path = Path(source_path) if source_path else find_fire_tv_capture(title)
+    if source_path and not source_path.exists():
+        raise FileNotFoundError(f"Fire TV source file not found: {source_path}")
+    if source_path and source_path.suffix.lower() != ".ts":
+        raise RuntimeError(f"Fire TV source is not a .ts file: {source_path}")
     if not source_path:
         log.warning(f"CONVERT FIRETV MISS -> {title} | paths={FIRE_TV_PATHS}")
         log_system_event(
@@ -2079,14 +3323,17 @@ def run_firetv_conversion(title: str):
         )
         raise FileNotFoundError(f"No matching .ts file found in {', '.join(FIRE_TV_PATHS)}")
 
-    log.info(f"CONVERT FIRETV START -> {title} | {source_path}")
-    result = convert_capture_to_plex_movie(title, source_path)
-    log.info(f"CONVERT FIRETV DONE -> {title} | {result.get('file')}")
+    source_title = title_from_ts_capture(source_path)
+    convert_title = source_title if extract_movie_year(source_title) and not extract_movie_year(title) else title
+
+    log.info(f"CONVERT FIRETV START -> {convert_title} | {source_path}")
+    result = convert_capture_to_plex_movie(convert_title, source_path)
+    log.info(f"CONVERT FIRETV DONE -> {convert_title} | {result.get('file')}")
     log_system_event(
         "info",
         "conversion",
         "Fire TV conversion completed",
-        title=title,
+        title=convert_title,
         details=result.get("file"),
     )
     return result
@@ -2143,8 +3390,10 @@ def probe_duration(path: Path):
 if __name__ == "__main__":
     load_config()
     set_server_process_title()
+    if not validate_db_ready("startup"):
+        log.error(f"Movies DB unavailable; server not started -> {DB_PATH}")
+        exit(2)
     load_runtime_settings()
-    ensure_db_mounted("startup", force=True)
 
     log.info("=" * 50)
     log.info("EPG Mac Recording Server starting...")
@@ -2165,6 +3414,8 @@ if __name__ == "__main__":
     log.info(f"Convert Safety  : {CONVERSION_RECORDING_SAFETY_SECONDS}s")
     log.info(f"Import Safety   : {GUIDE_IMPORT_RECORDING_SAFETY_SECONDS}s")
     log.info(f"Auto Import     : {GUIDE_IMPORT_AUTO_ENABLED} at {GUIDE_IMPORT_DAILY_TIME}")
+    log.info(f"Wanted Auto Rec : {WANTED_AUTO_RECORD_ENABLED} every {WANTED_AUTO_RECORD_INTERVAL_SECONDS}s")
+    log.info(f"TS Auto Cleanup : {TS_BACKLOG_AUTO_CLEANUP_ENABLED} target={TS_BACKLOG_QUEUE_TARGET} scan={TS_BACKLOG_SCAN_INTERVAL_SECONDS}s max={TS_BACKLOG_MAX_QUEUE_PER_SCAN}")
     log.info(f"Min Duration    : {MIN_DURATION_RATIO:.2f}")
     log.info(f"Min Bitrate     : {MIN_AVG_BITRATE_KBPS} kbps")
     log.info(f"Import Command  : {'configured' if GUIDE_IMPORT_COMMAND else 'not configured'}")
@@ -2183,9 +3434,6 @@ if __name__ == "__main__":
         log.error(f"ffmpeg not found at {FFMPEG_PATH}")
         log_system_event("error", "startup", "ffmpeg not found", details=FFMPEG_PATH)
         exit(1)
-
-    if not Path(DB_PATH).exists():
-        log_system_event("warn", "startup", "Movies DB path not found at startup", details=DB_PATH)
 
     load_conversion_queue()
 
